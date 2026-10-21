@@ -552,6 +552,16 @@ Nadie espera a nadie después del día 1: cada pieza tiene su sustituto (*mock*,
 
 ## 8. Ejecución (cuando esté implementado)
 
+**Entrega de Jenaro:** el panel de expertos, los prompts, el anonimizador, el análisis de sesgo y las cuatro páginas de Streamlit ya tienen una implementación contra datos simulados. Ver [guía de ejecución e integración](docs/entrega_jenaro.md). Para probarla sin backend ni keys:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements-jenaro.txt
+.venv\Scripts\python.exe -m streamlit run frontend/app.py
+```
+
+`USE_MOCKS=true` es el valor por defecto. La API, el motor real y el experimento empírico siguen pendientes de integración del equipo. Los siguientes comandos describen la ejecución conjunta prevista:
+
 ```bash
 pip install -r requirements.txt
 cp .env.example .env                       # cada uno completa su bloque LLM_*_<NOMBRE> (§3)

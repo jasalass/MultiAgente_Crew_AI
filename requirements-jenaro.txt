@@ -1,0 +1,7 @@
+# Dependencias de la entrega de Jenaro; no sustituye requirements.txt de Juan.
+streamlit>=1.54,<2
+plotly>=5.24,<7
+python-dotenv>=1,<2
+pydantic>=2,<3
+pytest>=8,<10
+# CrewAI es opcional para la demo; el motor real debe instalarlo.

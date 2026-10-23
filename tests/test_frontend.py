@@ -52,8 +52,9 @@ def test_formulario_y_ejecucion_demo(app):
     assert not app.exception
     assert app.session_state["active_run"]
     # Cada polling avanza un paso de la simulación; las reruns conservan el cliente.
+    # Desde Streamlit 1.6x, AppTest vuelve a la página por defecto tras switch_page: se fija la página.
     for _ in range(80):
-        app.run()
+        app.switch_page("pages/2_En_vivo.py").run()
         estado = app.session_state["api_client"].obtener_run(app.session_state["active_run"])
         if estado["estado"] == "finalizado":
             break

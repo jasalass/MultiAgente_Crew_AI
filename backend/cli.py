@@ -2,156 +2,26 @@
 
     python -m backend.cli data/proyectos/clinica_reservas.md            # LLM reales (.env)
     python -m backend.cli data/proyectos/clinica_reservas.md --mock     # sin keys ni red
+    python -m backend.cli data/proyectos/migracion_erp.md --asignacion mono
 
-Provisional: `cargar_proyecto` y `llms_desde_env` serán reemplazados por
-project_loader.py y ModelPool (Juan). Escribe outputs/runs/<run_id>/ con
-informe.md, adr/, rondas.json y eventos.jsonl.
+Escribe outputs/runs/<run_id>/ con informe.md, informe.json, adr/, rondas.json y
+eventos.jsonl. Los modelos salen del .env vía ModelPool (ver .env.example).
 """
 from __future__ import annotations
 
 import argparse
-import json
-import os
-import random
-import re
+import logging
+import sys
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
 
-from backend.delphi.adr import escribir_adrs
-from backend.delphi.asignacion import asignar_modelos
+from backend.delphi.config import RAIZ, ModelPool
 from backend.delphi.engine import DelphiEngine, RunCancelado, RunError
 from backend.delphi.experts import NUCLEO
-from backend.delphi.models import ConfigRun, Proyecto
-from backend.delphi.report import renderizar_informe
-
-RAIZ = Path(__file__).resolve().parents[1]
-SECCIONES = {"objetivo y contexto": "objetivo", "usuarios y volumen": "usuarios_volumen",
-             "requisitos funcionales": "requisitos_funcionales",
-             "requisitos no funcionales": "requisitos_no_funcionales", "restricciones": "restricciones",
-             "equipo": "equipo", "integraciones": "integraciones", "decisiones a evaluar": "decisiones_a_evaluar"}
-LISTAS = {"requisitos_funcionales", "requisitos_no_funcionales", "restricciones", "integraciones",
-          "decisiones_a_evaluar"}
-
-
-def cargar_proyecto(ruta: Path) -> Proyecto:
-    """Parser mínimo de la plantilla del README §1.6."""
-    texto = ruta.read_text(encoding="utf-8")
-    campos: dict = {"nombre": ruta.stem, "texto_original": texto}
-    actual = None
-    for linea in texto.splitlines():
-        if linea.startswith("# "):
-            campos["nombre"] = linea[2:].strip()
-        elif linea.startswith("## "):
-            clave = re.sub(r"\(.*?\)", "", linea[3:]).strip().lower()
-            actual = SECCIONES.get(clave)
-        elif actual and linea.strip():
-            if actual in LISTAS:
-                campos.setdefault(actual, []).append(linea.strip().lstrip("-*0123456789. ").strip())
-            else:
-                campos[actual] = (campos.get(actual, "") + " " + linea.strip()).strip()
-    campos.setdefault("objetivo", campos["nombre"])
-    return Proyecto(**campos)
-
-
-# --- LLM reales: un bloque LLM_*_<NOMBRE> del .env por modelo --------------------------
-
-def llms_desde_env(expertos: list[str], rotacion: int = 0):
-    """Lee el .env (ver su cabecera): bloques MODERADOR_<n> y un bloque por modelo experto."""
-    from crewai import LLM
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(RAIZ / ".env")
-    except ModuleNotFoundError:
-        pass
-    url_groq = os.environ.get("LLM_BASE_URL_GROQ", "")
-
-    def crear(nombre: str, modelo: str) -> "LLM":
-        extra: dict = {}
-        # Modelos de razonamiento (OpenRouter): LLM_REASONING_<N>=low|medium|high limita lo que
-        # "piensan" antes de responder; sin esto pueden agotar los tokens y devolver JSON vacío.
-        esfuerzo = os.environ.get(f"LLM_REASONING_{nombre}", "").strip()
-        if esfuerzo:
-            extra["extra_body"] = {"reasoning": {"effort": esfuerzo}}
-        tope = os.environ.get(f"LLM_MAX_TOKENS_{nombre}", "").strip()
-        if tope:
-            extra["max_tokens"] = int(tope)
-        return LLM(model=f"openai/{modelo}", api_key=os.environ[f"LLM_API_KEY_{nombre}"],
-                   base_url=os.environ.get(f"LLM_BASE_URL_{nombre}", url_groq), **extra)
-
-    bloques = sorted(k.removeprefix("LLM_API_KEY_") for k in os.environ if k.startswith("LLM_API_KEY_"))
-    bloques = [b for b in bloques if os.environ[f"LLM_API_KEY_{b}"].strip()]   # sin key: se omite
-    # Moderadores: mismo modelo, una key distinta cada uno (se rotan entre expertos).
-    modelo_mod = os.environ.get("LLM_MODEL_MODERADOR", "")
-    moderadores = [crear(b, modelo_mod) for b in bloques if b.startswith("MODERADOR_")]
-    if not moderadores:
-        raise SystemExit("Faltan los bloques LLM_API_KEY_MODERADOR_<n> y LLM_MODEL_MODERADOR en el .env.")
-    # Expertos: un bloque por modelo; se omiten los que aún tienen el modelo sin completar.
-    modelos = [crear(b, os.environ[f"LLM_MODEL_{b}"]) for b in bloques
-               if not b.startswith("MODERADOR_") and "<" not in os.environ.get(f"LLM_MODEL_{b}", "<")]
-    if not modelos:
-        raise SystemExit("No hay bloques de expertos completos en el .env (ver su cabecera).")
-    asignado = asignar_modelos(expertos, modelos, rotacion)   # sin roles afines en el mismo modelo
-    asignado["moderador"] = moderadores
-    if len(modelos) < 2:
-        print("AVISO: un solo modelo de experto: panel mono-modelo, riesgo de falso consenso.")
-    return lambda agente_id: asignado[agente_id]
-
-
-# --- Modo --mock: LLM falsos y deterministas, para ver el flujo completo sin keys --------
-
-def mock(semilla: int):
-    azar = random.Random(semilla)
-    cuestionario = {
-        "decisiones": [{"id": "ARQ-D1", "dimension": "arquitectura", "titulo": "Estilo de arquitectura",
-                        "alternativas": ["Monolito modular", "Microservicios"]},
-                       {"id": "INF-D1", "dimension": "infraestructura", "titulo": "Proveedor cloud",
-                        "alternativas": ["AWS", "Azure"]}],
-        "items": [
-            {"id": "ARQ-E1", "dimension": "arquitectura", "tipo": "evaluacion", "pregunta": "¿Es viable el plazo?"},
-            {"id": "SEG-E1", "dimension": "seguridad", "tipo": "evaluacion", "pregunta": "¿Se protegen los datos personales?"},
-            {"id": "ARQ-D1-a", "dimension": "arquitectura", "tipo": "alternativa", "pregunta": "¿Adecuada?",
-             "decision_id": "ARQ-D1", "alternativa": "Monolito modular"},
-            {"id": "ARQ-D1-b", "dimension": "arquitectura", "tipo": "alternativa", "pregunta": "¿Adecuada?",
-             "decision_id": "ARQ-D1", "alternativa": "Microservicios"},
-            {"id": "INF-D1-a", "dimension": "infraestructura", "tipo": "alternativa", "pregunta": "¿Adecuado?",
-             "decision_id": "INF-D1", "alternativa": "AWS"},
-            {"id": "INF-D1-b", "dimension": "infraestructura", "tipo": "alternativa", "pregunta": "¿Adecuado?",
-             "decision_id": "INF-D1", "alternativa": "Azure"}]}
-    base = {"ARQ-E1": 4, "SEG-E1": 3, "ARQ-D1-a": 5, "ARQ-D1-b": 2, "INF-D1-a": 4, "INF-D1-b": 4}
-    justificaciones = ["Prioriza mantenibilidad y separación de responsabilidades.",
-                       "Reduce la superficie de ataque y el costo operativo."]
-
-    def ejecutar(moderador_llm, expertos, llms, prompts, **_):
-        ronda_k = any("RETROALIMENTACIÓN" in p.upper() or "FEEDBACK" in p.upper() for p in prompts.values())
-        ruido = 1 if ronda_k else 2          # la dispersión baja en rondas posteriores
-        salida = {}
-        for e in expertos:
-            salida[e["id"]] = json.dumps({
-                "respuestas": [{"item_id": i, "puntaje": max(1, min(5, v + azar.randint(-ruido, ruido))),
-                                "justificacion": azar.choice(justificaciones)} for i, v in base.items()],
-                "riesgos_detectados": azar.sample(["Plazo ajustado", "Fuga de datos personales",
-                                                   "Costos cloud fuera de control"], 2)})
-        return salida
-
-    def moderador(prompt: str) -> str:
-        if "Diseña el cuestionario" in prompt:
-            return json.dumps(cuestionario)
-        return '{"continuar": true, "motivo": "aún hay ítems sin consenso"}'
-
-    return ejecutar, moderador
-
-
-# --- Persistencia ---------------------------------------------------------------------
-
-def guardar(directorio: Path, informe, eventos: list) -> None:
-    directorio.mkdir(parents=True, exist_ok=True)
-    (directorio / "informe.md").write_text(renderizar_informe(informe), encoding="utf-8")
-    escribir_adrs(informe.adrs, directorio / "adr")
-    (directorio / "rondas.json").write_text(
-        json.dumps([r.model_dump() for r in informe.rondas], ensure_ascii=False, indent=2), encoding="utf-8")
-    (directorio / "eventos.jsonl").write_text(
-        "\n".join(e.model_dump_json() for e in eventos) + "\n", encoding="utf-8")
+from backend.delphi.models import ConfigRun, EstadoRun
+from backend.delphi.project_loader import cargar_proyecto
+from backend.delphi.report import guardar_resultados
+from backend.delphi.simulado import crear_simulacion, pool_simulado
 
 
 def main() -> None:
@@ -160,43 +30,67 @@ def main() -> None:
     ap.add_argument("--expertos", nargs="+", default=list(NUCLEO), help="ids del panel (por defecto, el núcleo)")
     ap.add_argument("--min-rondas", type=int, default=2)
     ap.add_argument("--max-rondas", type=int, default=3)
-    ap.add_argument("--rotacion", type=int, default=None,
-                    help="desplaza la asignación de modelos; por defecto cambia en cada ejecución")
-    ap.add_argument("--pausa", type=float, default=10.0, help="segundos entre expertos (modelos reales)")
+    ap.add_argument("--asignacion", choices=["auto", "seed", "mono"], default="seed",
+                    help="reparto de modelos (README §3); seed rota la asignación entre ejecuciones")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="semilla de seed/mono; por defecto, la cantidad de runs ya guardados")
+    ap.add_argument("--pausa", type=float, default=5.0, help="segundos entre el inicio de un experto y el siguiente")
+    ap.add_argument("--paralelo", type=int, default=5, help="expertos que responden a la vez (1 = de a uno)")
     ap.add_argument("--mock", action="store_true", help="LLM falsos: no usa keys ni red")
-    ap.add_argument("--semilla", type=int, default=7, help="semilla del modo --mock")
     args = ap.parse_args()
+    # La consola de Windows (cp1252) no admite algunos caracteres que escriben los LLM (p. ej. "‑").
+    for flujo in (sys.stdout, sys.stderr):
+        flujo.reconfigure(errors="replace")
+    logging.basicConfig(format="%(asctime)s %(name)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
+    logging.getLogger("delphi").setLevel(logging.INFO)
 
+    runs = RAIZ / "outputs" / "runs"
+    seed = args.seed if args.seed is not None else (len(list(runs.iterdir())) if runs.exists() else 0)
     config = ConfigRun(proyecto=cargar_proyecto(args.proyecto), expertos=args.expertos,
+                       asignacion_modelos=args.asignacion, seed=seed,
                        min_rondas=args.min_rondas, max_rondas=args.max_rondas)
+    pool = pool_simulado() if args.mock else ModelPool.desde_env()
+    try:
+        llm_para = pool.para_run(config)
+    except ValueError as error:
+        raise SystemExit(f"{error} Revisa el .env (ver .env.example).")
+    print(f"Asignación de modelos ({config.asignacion_modelos}, semilla {seed}):")
+    for e in args.expertos:
+        print(f"  {e:13} -> {llm_para(e).model}")
+    moderadores = llm_para("moderador")
+    print(f"  {'moderador':13} -> {moderadores[0].model} ({len(moderadores)} key/s)")
+    for llm in llm_para("puntual"):
+        print(f"  {'puntual':13} -> {llm.model} (cuestionario y riesgos)")
+    for aviso in pool.avisos:
+        print(f"AVISO: {aviso}")
     if args.mock:
-        ejecutar, moderador = mock(args.semilla)
-        motor = DelphiEngine(lambda _id: SimpleNamespace(model=f"mock-{hash(_id) % 3}"), ejecutar, moderador)
+        ejecutar, moderador = crear_simulacion(seed)
+        motor = DelphiEngine(llm_para, ejecutar, moderador)
     else:
-        runs = RAIZ / "outputs" / "runs"
-        rotacion = args.rotacion if args.rotacion is not None else (len(list(runs.iterdir())) if runs.exists() else 0)
-        llm_para = llms_desde_env(args.expertos, rotacion)
-        print(f"Asignación de modelos (rotación {rotacion}):")
-        for e in args.expertos:
-            print(f"  {e:13} -> {llm_para(e).model}")
-        motor = DelphiEngine(llm_para, pausa_entre_expertos=args.pausa)
+        motor = DelphiEngine(llm_para, pausa_entre_expertos=args.pausa, paralelo=args.paralelo,
+                             modelo_alternativo=pool.alternativo, avisos=pool.avisos)
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    eventos: list = []
+    destino = runs / run_id
+    destino.mkdir(parents=True, exist_ok=True)
+    eventos = destino / "eventos.jsonl"
 
     def al_evento(e):
-        eventos.append(e)
+        with open(eventos, "a", encoding="utf-8") as archivo:
+            archivo.write(e.model_dump_json() + "\n")
         print(f"[{e.seq:03d}] {e.tipo}" + (f" (ronda {e.ronda})" if e.ronda else ""))
 
-    destino = RAIZ / "outputs" / "runs" / run_id
     try:
         informe = motor.run(run_id, config, al_evento, lambda: False)
     except (RunCancelado, RunError) as error:
         print(f"Run terminado sin informe: {error}")
-        destino.mkdir(parents=True, exist_ok=True)
-        (destino / "eventos.jsonl").write_text("\n".join(e.model_dump_json() for e in eventos) + "\n", encoding="utf-8")
         raise SystemExit(1)
-    guardar(destino, informe, eventos)
+    guardar_resultados(destino, informe)
+    # estado.json: así el Historial de la API y el frontend también muestran los runs de la CLI.
+    (destino / "estado.json").write_text(EstadoRun(
+        run_id=run_id, estado="finalizado", ronda_actual=len(informe.rondas), config=config,
+        creado=datetime.strptime(run_id, "%Y%m%d-%H%M%S").astimezone(),
+        finalizado=datetime.now().astimezone()).model_dump_json(indent=2), encoding="utf-8")
     print(f"\nListo. Resultados en {destino}")
     for d in informe.decisiones:
         print(f"  {d.estado.upper():13} {d.titulo}: {d.alternativa_recomendada or 'ABIERTA'}")

@@ -61,9 +61,7 @@ def estadisticas_ronda(respuestas: list[Any], umbral_iqr: float = 1.0) -> list[d
 
 def porcentaje_consenso(estadisticas: list[dict[str, Any]]) -> float:
     """Fracción (0-1) de ítems con consenso; se compara con umbral_consenso_global."""
-    if not estadisticas:
-        return 0.0
-    return sum(1 for e in estadisticas if e["consenso"]) / len(estadisticas)
+    return stats.porcentaje_consenso(e["consenso"] for e in estadisticas)
 
 
 def _ejecutar(respuestas: list[Any], umbral_iqr: float = 1.0) -> str:

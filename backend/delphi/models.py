@@ -1,6 +1,7 @@
-"""PROVISIONAL: contratos de README §4.1, transcritos tal cual.
+"""Contratos de README §4.1, transcritos tal cual.
 
-Juan es el dueño de este archivo. Al integrar, se usa su versión (debe ser idéntica).
+Cambiar este archivo requiere el visto bueno de los tres (README §7);
+tests/test_plataforma.py comprueba que los campos coincidan con el README.
 """
 from __future__ import annotations
 
@@ -127,6 +128,13 @@ class ADR(BaseModel):
     consecuencias: list[str]
     evidencia_delphi: str                  # mediana, IQR, rondas y argumentos clave
 
+class Viabilidad(BaseModel):              # veredicto global; lo calcula el código desde el ítem VIA-E1
+    veredicto: Literal["viable", "viable_con_condiciones", "no_viable", "en_discusion"]
+    mediana: float
+    iqr: float
+    consenso: bool
+    explicacion: str
+
 class InformeDelphi(BaseModel):
     proyecto: Proyecto
     panel: list[str]
@@ -141,6 +149,7 @@ class InformeDelphi(BaseModel):
     adrs: list[ADR]
     sesgo_por_modelo: list[SesgoModelo]
     avisos: list[str]                      # p. ej. "panel mono-modelo"
+    viabilidad: Viabilidad | None = None   # ¿el proyecto, tal como está planteado, es viable?
 
 class EventoDelphi(BaseModel):             # lo que consume el frontend en vivo
     run_id: str

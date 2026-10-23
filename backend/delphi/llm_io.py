@@ -1,6 +1,6 @@
-"""PROVISIONAL: extracción y validación de JSON de un LLM, con un reintento.
+"""Extracción y validación de JSON de un LLM, con un reintento (README §4.3).
 
-Juan es el dueño de este módulo (README §5). El motor solo usa `llamar_y_validar`.
+Lo usan los expertos (engine.py) y el Moderador (cuestionario, continuar, riesgos).
 """
 from __future__ import annotations
 
@@ -15,8 +15,11 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def extraer_json(texto: str) -> str:
-    """Quita bloques <think> y cercas ```; devuelve el primer objeto JSON balanceado."""
-    texto = re.sub(r"<think>.*?</think>", "", texto, flags=re.DOTALL)
+    """Quita el razonamiento (<think> o <thought>, según el modelo) y las cercas ```.
+
+    Devuelve el primer objeto JSON balanceado.
+    """
+    texto = re.sub(r"<(think|thought)>.*?</\1>", "", texto, flags=re.DOTALL)
     texto = re.sub(r"```(?:json)?", "", texto)
     inicio = texto.find("{")
     if inicio < 0:
@@ -25,8 +28,11 @@ def extraer_json(texto: str) -> str:
     for i in range(inicio, len(texto)):
         c = texto[i]
         if en_cadena:
-            escape = (c == "\\") and not escape
-            if c == '"' and not escape:
+            if escape:                       # el carácter anterior fue \: este no cuenta
+                escape = False
+            elif c == "\\":
+                escape = True
+            elif c == '"':
                 en_cadena = False
         elif c == '"':
             en_cadena = True

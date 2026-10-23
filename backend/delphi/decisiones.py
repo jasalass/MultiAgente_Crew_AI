@@ -15,10 +15,10 @@ from statistics import median
 
 from pydantic import BaseModel, Field
 
-from backend.delphi import llm_io
+from backend.delphi import llm_io, stats
 from backend.delphi.models import (
     Cuestionario, Decision, DecisionRecomendada, EstadisticaItem,
-    RespuestaExperto, Riesgo, ResumenRonda,
+    RespuestaExperto, Riesgo, ResumenRonda, Viabilidad,
 )
 
 DIMENSIONES = ("arquitectura", "infraestructura", "stack", "datos",
@@ -29,15 +29,12 @@ DIMENSIONES = ("arquitectura", "infraestructura", "stack", "datos",
 
 def clasificar_decision(decision: Decision, cuestionario: Cuestionario,
                         estadisticas: dict[str, EstadisticaItem]) -> DecisionRecomendada:
-    """Elige la mejor alternativa y la clasifica.
+    """Elige la mejor alternativa y la clasifica con la regla de stats.estado_decision.
 
-    firme:        consenso (IQR <= umbral), mediana >= 4 y supera en >= 1 a la segunda.
-    condicionada: consenso, pero margen < 1 o mediana == 3.
-    abierta:      sin consenso en la mejor, o consenso en una mediana <= 2 (ninguna
-                  alternativa resulta adecuada): hay que resolver con una PoC o spike.
+    Aquí solo se agregan las condiciones (si es condicionada) o la PoC sugerida (si es abierta).
     """
     candidatas = [(i.alternativa, estadisticas[i.id]) for i in cuestionario.items
-                  if i.decision_id == decision.id and i.id in estadisticas]
+                  if i.tipo == "alternativa" and i.decision_id == decision.id and i.id in estadisticas]
     if not candidatas:
         raise ValueError(f"La decisión {decision.id} no tiene alternativas con respuestas")
     # Mayor mediana; a igualdad, menor IQR (más consenso).
@@ -46,19 +43,17 @@ def clasificar_decision(decision: Decision, cuestionario: Cuestionario,
     margen = mejor.mediana - candidatas[1][1].mediana if len(candidatas) > 1 else mejor.mediana
     segunda = candidatas[1][0] if len(candidatas) > 1 else None
 
-    if mejor.consenso and mejor.mediana >= 4 and margen >= 1:
-        estado, condiciones, poc = "firme", [], None
-    elif mejor.consenso and mejor.mediana >= 3:
-        estado, poc = "condicionada", None
-        condiciones = []
+    estado = stats.estado_decision(mejor.consenso, mejor.mediana, margen)
+    condiciones: list[str] = []
+    poc = None
+    if estado == "condicionada":
         if margen < 1 and segunda:
             condiciones.append(f"La ventaja sobre «{segunda}» es de {margen:g} punto(s): "
                                "revisar la decisión en un hito definido.")
         if mejor.mediana == 3:
             condiciones.append("La adecuación es solo intermedia (mediana 3): "
                                "validar los supuestos antes de comprometerse.")
-    else:
-        estado, condiciones = "abierta", []
+    elif estado == "abierta":
         rivales = " vs ".join(f"«{n}»" for n, _ in candidatas[:2])
         poc = f"PoC o spike comparando {rivales} antes de decidir."
     return DecisionRecomendada(
@@ -168,3 +163,39 @@ def resumen_final(cuestionario: Cuestionario, rondas: list[ResumenRonda]):
     decisiones = recomendar_decisiones(cuestionario, ultima)
     return (decisiones, evaluacion_por_dimension(cuestionario, ultima),
             detectar_disensos(cuestionario, ultima), generar_recomendaciones(decisiones))
+
+
+# --- Viabilidad global (ítem VIA-E1, lo agrega el motor) -------------------------------
+
+ITEM_VIABILIDAD = "VIA-E1"
+TEXTO_VEREDICTO = {
+    "viable": "El proyecto es VIABLE tal como está planteado",
+    "viable_con_condiciones": "El proyecto es VIABLE CON CONDICIONES: requiere ajustes antes de comprometerse",
+    "no_viable": "El proyecto NO ES VIABLE tal como está planteado",
+    "en_discusion": "El panel NO LLEGÓ A ACUERDO sobre la viabilidad del proyecto",
+}
+
+
+def evaluar_viabilidad(ultima: ResumenRonda, decisiones: list[DecisionRecomendada],
+                       riesgos: list[Riesgo]) -> Viabilidad | None:
+    """Veredicto explícito a partir de la mediana final del ítem de viabilidad (regla en stats.py).
+
+    La explicación junta lo que el panel dijo en contra (o a favor), los riesgos más graves y
+    las decisiones que piden cambiar el plan (abiertas o condicionadas). Todo es anónimo.
+    """
+    item = next((e for e in ultima.estadisticas if e.item_id == ITEM_VIABILIDAD), None)
+    if item is None:
+        return None
+    veredicto = stats.veredicto_viabilidad(item.consenso, item.mediana)
+    partes = [f"{TEXTO_VEREDICTO[veredicto]} (mediana {item.mediana:g} de 5, IQR {item.iqr:g})."]
+    argumentos = item.argumentos_en_contra if veredicto != "viable" else item.argumentos_a_favor
+    if argumentos:
+        partes.append("Argumentos del panel: " + " ".join(argumentos[:3]))
+    graves = sorted(riesgos, key=lambda r: -r.probabilidad * r.impacto)[:2]
+    if graves and veredicto != "viable":
+        partes.append("Riesgos más graves: " + "; ".join(r.descripcion for r in graves) + ".")
+    cambios = [d.titulo for d in decisiones if d.estado != "firme"]
+    if cambios and veredicto != "viable":
+        partes.append("Decisiones sin cerrar: " + ", ".join(cambios) + ".")
+    return Viabilidad(veredicto=veredicto, mediana=item.mediana, iqr=item.iqr,
+                      consenso=item.consenso, explicacion=" ".join(partes))

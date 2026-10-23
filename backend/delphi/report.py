@@ -1,9 +1,15 @@
 """informe.md a partir de un InformeDelphi (README §1.7 y §5, Pamela)."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
+from backend.delphi.adr import escribir_adrs
 from backend.delphi.models import InformeDelphi
 
 ICONO = {"firme": "✅ Firme", "condicionada": "⚠️ Condicionada", "abierta": "❓ Abierta"}
+VEREDICTO = {"viable": "✅ Viable", "viable_con_condiciones": "⚠️ Viable con condiciones",
+             "no_viable": "⛔ No viable tal como está planteado", "en_discusion": "❓ Viabilidad en discusión"}
 
 
 def _tabla(encabezados: list[str], filas: list[list[str]]) -> str:
@@ -28,8 +34,11 @@ def _resumen_ejecutivo(i: InformeDelphi) -> str:
 def renderizar_informe(i: InformeDelphi) -> str:
     dims = sorted(i.evaluacion_por_dimension.items(), key=lambda kv: kv[1])
     riesgos = sorted(i.riesgos, key=lambda r: -r.probabilidad * r.impacto)
-    sec = [f"# Informe Delphi — {i.proyecto.nombre}", "",
-           "## Resumen ejecutivo", _resumen_ejecutivo(i), ""]
+    sec = [f"# Informe Delphi — {i.proyecto.nombre}", ""]
+    if i.viabilidad:
+        sec += ["## Veredicto de viabilidad", f"**{VEREDICTO[i.viabilidad.veredicto]}**", "",
+                i.viabilidad.explicacion, ""]
+    sec += ["## Resumen ejecutivo", _resumen_ejecutivo(i), ""]
     if i.avisos:
         sec += ["> " + " · ".join(i.avisos), ""]
 
@@ -67,3 +76,16 @@ def renderizar_informe(i: InformeDelphi) -> str:
                    [[s.modelo, f"{s.puntaje_medio:.2f}", f"{s.desviacion_vs_mediana_grupo:+.2f}"]
                     for s in i.sesgo_por_modelo]), ""]
     return "\n".join(sec)
+
+
+def guardar_resultados(directorio: Path, informe: InformeDelphi) -> None:
+    """outputs/runs/<run_id>/: informe.md, informe.json, adr/ y rondas.json (README §1.7).
+
+    eventos.jsonl lo escribe quien recibe los eventos (CLI o RunStore), a medida que llegan.
+    """
+    directorio.mkdir(parents=True, exist_ok=True)
+    (directorio / "informe.md").write_text(renderizar_informe(informe), encoding="utf-8")
+    (directorio / "informe.json").write_text(informe.model_dump_json(indent=2), encoding="utf-8")
+    escribir_adrs(informe.adrs, directorio / "adr")
+    (directorio / "rondas.json").write_text(
+        json.dumps([r.model_dump() for r in informe.rondas], ensure_ascii=False, indent=2), encoding="utf-8")

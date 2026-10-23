@@ -18,7 +18,8 @@ ESTADO_ADR = {"firme": "aceptada", "condicionada": "condicionada", "abierta": "a
 
 def _alternativas(cuestionario: Cuestionario, decision_id: str) -> dict[str, str]:
     """nombre de alternativa -> item_id"""
-    return {i.alternativa: i.id for i in cuestionario.items if i.decision_id == decision_id}
+    return {i.alternativa: i.id for i in cuestionario.items
+            if i.tipo == "alternativa" and i.decision_id == decision_id}
 
 
 def _stats_por_ronda(rondas: list[ResumenRonda]) -> list[dict[str, EstadisticaItem]]:

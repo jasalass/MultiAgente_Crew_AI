@@ -16,6 +16,63 @@ def formatear_fecha(valor):
     return fecha.astimezone(ZoneInfo("America/Santiago")).strftime("%d/%m/%Y %H:%M:%S %Z")
 
 
+def sin_parpadeo():
+    """Evita que la página se atenúe en cada actualización automática (cada 2 s en En vivo).
+
+    Streamlit marca como "stale" lo que está por redibujar y lo muestra semitransparente;
+    con un fragmento que se refresca solo, eso se ve como un parpadeo constante.
+    """
+    st.markdown("<style>[data-stale='true'], .stale-element {opacity: 1 !important; transition: none !important;}"
+                "</style>", unsafe_allow_html=True)
+
+
+VEREDICTOS = {
+    "viable": ("success", "✅ Viable"),
+    "viable_con_condiciones": ("warning", "⚠️ Viable con condiciones"),
+    "no_viable": ("error", "⛔ No viable tal como está planteado"),
+    "en_discusion": ("info", "❓ Viabilidad en discusión"),
+}
+
+
+def veredicto_viabilidad(informe):
+    """Caja destacada con el veredicto global (lo calcula el motor desde la pregunta VIA-E1)."""
+    viabilidad = informe.get("viabilidad")
+    if not viabilidad:
+        return
+    tipo, titulo = VEREDICTOS[viabilidad["veredicto"]]
+    getattr(st, tipo)(f"### {titulo}\n\n{viabilidad['explicacion']}")
+    st.caption(f"Pregunta de viabilidad global: mediana {viabilidad['mediana']:g} de 5 · IQR {viabilidad['iqr']:g} · "
+               f"{'con' if viabilidad['consenso'] else 'sin'} consenso. Regla: viable ≥ 4, con condiciones ≥ 3, "
+               "no viable < 3; sin consenso queda en discusión.")
+
+
+def gravedad(riesgo):
+    puntaje = riesgo["probabilidad"] * riesgo["impacto"]
+    if puntaje >= 15:
+        return puntaje, "🔴 Alta"
+    if puntaje >= 8:
+        return puntaje, "🟠 Media"
+    return puntaje, "🟡 Baja"
+
+
+def riesgos_claros(informe):
+    """Riesgos de mayor a menor gravedad (probabilidad × impacto), cada uno con su mitigación."""
+    riesgos = sorted(informe.get("riesgos", []), key=lambda r: -r["probabilidad"] * r["impacto"])
+    if not riesgos:
+        st.info("El panel no señaló riesgos.")
+        return
+    conteo = [gravedad(r)[1] for r in riesgos]
+    st.caption(" · ".join(f"{nivel}: {conteo.count(nivel)}" for nivel in ("🔴 Alta", "🟠 Media", "🟡 Baja")) +
+               " · Gravedad = probabilidad × impacto (1 a 25): alta ≥ 15, media 8 a 14, baja < 8.")
+    for n, riesgo in enumerate(riesgos, 1):
+        puntaje, nivel = gravedad(riesgo)
+        with st.container(border=True):
+            st.markdown(f"**R{n} · {nivel} ({puntaje}/25)** — {riesgo['descripcion']}")
+            st.caption(f"Dimensión: {riesgo['dimension']} · probabilidad {riesgo['probabilidad']}/5 · "
+                       f"impacto {riesgo['impacto']}/5")
+            st.markdown(f"**Mitigación:** {riesgo['mitigacion']}")
+
+
 def cliente():
     if "api_client" not in st.session_state:
         st.session_state.api_client = ApiClient()
@@ -58,26 +115,25 @@ def tarjetas_decisiones(informe):
 
 
 def mostrar_informe(informe):
+    veredicto_viabilidad(informe)
     for aviso in informe.get("avisos", []):
         st.warning(aviso)
+    st.subheader("Decisiones recomendadas")
     tarjetas_decisiones(informe)
+    st.subheader("Riesgos")
+    izquierda, derecha = st.columns([3, 2])
+    with izquierda:
+        riesgos_claros(informe)
+    with derecha:
+        st.plotly_chart(matriz_riesgos(informe), width="stretch")
     decisiones = informe.get("cuestionario", {}).get("decisiones", [])
     if decisiones:
         seleccion = st.selectbox("Convergencia de una decisión", decisiones,
                                 format_func=lambda d: d["titulo"])
         st.plotly_chart(convergencia(informe, seleccion["id"]), width="stretch")
         st.caption("Las barras muestran Q1–Q3; los puntos, la mediana. Escala Likert 1–5.")
-    izquierda, derecha = st.columns(2)
-    with izquierda:
-        st.subheader("Evaluación por dimensión")
-        st.plotly_chart(radar(informe), width="stretch")
-    with derecha:
-        st.subheader("Matriz de riesgos")
-        st.plotly_chart(matriz_riesgos(informe), width="stretch")
-    for i, riesgo in enumerate(informe.get("riesgos", []), 1):
-        with st.expander(f"R{i} · {riesgo['descripcion']}"):
-            st.write(f"{riesgo['dimension']} · probabilidad {riesgo['probabilidad']}/5 · impacto {riesgo['impacto']}/5")
-            st.write(riesgo["mitigacion"])
+    st.subheader("Evaluación por dimensión")
+    st.plotly_chart(radar(informe), width="stretch")
     st.subheader("Argumentos y disensos")
     preguntas = {i["id"]: i.get("alternativa") or i["pregunta"] for i in informe.get("cuestionario", {}).get("items", [])}
     rondas = informe.get("rondas", [])

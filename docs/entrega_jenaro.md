@@ -99,11 +99,11 @@ Cuando la API, el motor y las credenciales estén configurados:
 
 ```powershell
 .venv\Scripts\python.exe -m scripts.experimento_sesgo --api-url http://localhost:8000 --timeout 1800
-# O bien usar los tres archivos preparados por Juan:
-.venv\Scripts\python.exe -m scripts.experimento_sesgo --api-url http://localhost:8000 --proyectos data/proyectos/clinica_reservas.md data/proyectos/erp.md data/proyectos/marketplace.md
+# O bien usar los tres archivos de data/proyectos/:
+.venv\Scripts\python.exe -m scripts.experimento_sesgo --api-url http://localhost:8000 --proyectos data/proyectos/clinica_reservas.md data/proyectos/migracion_erp.md data/proyectos/marketplace_ia.md
 ```
 
-La segunda orden ilustra nombres de archivo: deben sustituirse por los nombres reales cuando Juan los agregue. Se compara IQR medio de la primera ronda, primera ronda con consenso global, alternativas recomendadas y estados. Un cierre por estabilidad no se cuenta como consenso. Se informa si los cuestionarios difieren y si hay decisiones sin pareja. Se conserva el mismo proyecto y configuración de panel entre ambos modos.
+La segunda orden usa los tres proyectos de `data/proyectos/`. Se compara IQR medio de la primera ronda, primera ronda con consenso global, alternativas recomendadas y estados. Un cierre por estabilidad no se cuenta como consenso. Se informa si los cuestionarios difieren y si hay decisiones sin pareja. Se conserva el mismo proyecto y configuración de panel entre ambos modos.
 
 ## Pruebas y límites
 

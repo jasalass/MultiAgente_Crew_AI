@@ -1,7 +1,6 @@
 """Asignación de modelos a expertos con rotación y restricción de roles afines.
 
-Provisional: la regla vive en ModelPool (Juan, README §3). Aquí es una función pura
-para poder probarla y reutilizarla.
+Función pura que usa ModelPool (config.py, README §3) para los modos auto y seed.
 
   - Reparto equilibrado: cada paso elige el modelo menos usado.
   - Roles afines (README §1.5) nunca comparten modelo: Arquitectura–Desarrollo,

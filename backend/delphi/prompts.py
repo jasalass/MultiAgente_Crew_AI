@@ -45,7 +45,8 @@ def _proyectar(valor: Any, campos: tuple[str, ...]) -> dict[str, Any]:
 
 def _json(valor: Any) -> str:
     try:
-        return json.dumps(valor, ensure_ascii=False, allow_nan=False, indent=2)
+        # Compacto: con sangría el prompt de la ronda k crece ~20 % y no cabe en los planes gratuitos.
+        return json.dumps(valor, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     except (ValueError, TypeError) as error:
         raise ValueError("El contexto debe contener solo datos JSON finitos") from error
 

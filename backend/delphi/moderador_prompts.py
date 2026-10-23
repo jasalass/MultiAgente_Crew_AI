@@ -1,13 +1,15 @@
 """Prompts del Moderador Delphi (README §5, Pamela).
 
-Tres momentos en los que el Moderador usa un LLM:
+Momentos en los que el Moderador usa un LLM:
   1. Cuestionario: identificar las decisiones clave y generar los ítems.
-  2. Feedback de ronda: explicar al panel, en lenguaje neutro, dónde hay
-     acuerdo y desacuerdo.
+  2. Delegación: en cada ronda delega a cada experto su enunciado sellado (crew.py).
   3. Propuesta de continuar: opinar si conviene otra ronda.
+  4. Riesgos: agrupar los riesgos del panel (decisiones.py).
 
 El LLM solo PROPONE. Los números los calcula tools.py y los límites de rondas
-los impone engine.py. El feedback nunca incluye roles, autores ni modelos.
+los impone engine.py. El feedback entre rondas no es prosa del Moderador: son las
+estadísticas más los argumentos anónimos saneados (anonymizer.py), sin roles,
+autores ni modelos. Así ningún texto libre del LLM llega a otro experto.
 """
 from __future__ import annotations
 
@@ -21,9 +23,9 @@ ROLE = "Moderador Delphi"
 GOAL = ("Conducir un panel anónimo de expertos de TI hacia decisiones de proyecto "
         "bien fundamentadas, sin opinar sobre el fondo ni revelar quién dijo qué.")
 BACKSTORY = ("Facilitas paneles Delphi. Eres neutral: no tienes preferencia por ninguna "
-             "tecnología. Tu trabajo es estructurar preguntas, delegar a cada experto por "
-             "separado y devolver al grupo un resumen anónimo. Nunca calculas estadísticas "
-             "a mano: usas la herramienta de estadísticas.")
+             "tecnología. Tu trabajo es estructurar preguntas y delegar a cada experto por "
+             "separado. No calculas estadísticas ni reescribes respuestas: el sistema calcula "
+             "la mediana y el IQR y resume los argumentos de forma anónima.")
 
 
 def _json(valor: Any) -> str:
@@ -56,6 +58,7 @@ REGLAS:
 - Ids: evaluación "ARQ-E1"; decisión "ARQ-D1"; alternativa "ARQ-D1-a", "ARQ-D1-b"...
   (prefijo de 3 letras de la dimensión).
 - Preguntas neutrales: no sugieras la respuesta correcta.
+- No incluyas una pregunta de viabilidad global del proyecto: el sistema la agrega siempre.
 
 Responde SOLO un JSON con esta forma:
 {{"decisiones": [{{"id": "ARQ-D1", "dimension": "arquitectura", "titulo": "...", "alternativas": ["...", "..."]}}],
@@ -63,27 +66,6 @@ Responde SOLO un JSON con esta forma:
              "decision_id": null, "alternativa": null}},
            {{"id": "ARQ-D1-a", "dimension": "arquitectura", "tipo": "alternativa", "pregunta": "...",
              "decision_id": "ARQ-D1", "alternativa": "..."}}]}}"""
-
-
-def construir_prompt_feedback(ronda: int, cuestionario: Any, estadisticas: list[dict[str, Any]],
-                              argumentos: list[dict[str, Any]]) -> str:
-    """Redacta el feedback que verán los expertos en la ronda siguiente."""
-    return f"""Eres el {ROLE}. Termina la ronda {ronda}. Redacta el feedback para el panel.
-
-CUESTIONARIO:
-{_json(cuestionario)}
-
-ESTADÍSTICAS DE LA RONDA (calculadas por la herramienta; no las modifiques):
-{_json(estadisticas)}
-
-ARGUMENTOS ANÓNIMOS:
-{_json(argumentos)}
-
-REGLAS:
-- Señala en qué ítems hay consenso (IQR <= 1) y en cuáles no, y por qué se discrepa.
-- NO menciones roles, autores, modelos ni cuántos expertos opinaron cada cosa.
-- NO inventes cifras: usa solo las estadísticas entregadas.
-- Máximo 150 palabras. Texto plano."""
 
 
 def construir_prompt_continuar(ronda: int, max_rondas: int, porcentaje_consenso: float,

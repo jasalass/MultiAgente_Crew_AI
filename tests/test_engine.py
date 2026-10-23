@@ -169,7 +169,9 @@ def _motor_crewai(llm_para, **extra):
 
 def _llm(nombre):
     from crewai import LLM
-    return LLM(model=f"openai/{nombre}", api_key="no-se-usa")
+    # Igual que ModelPool: un endpoint compatible permite nombres ajenos al
+    # catálogo nativo. El Crew falso intercepta las llamadas de estas pruebas.
+    return LLM(model=f"openai/{nombre}", api_key="no-se-usa", base_url="http://127.0.0.1:1/v1")
 
 
 def test_429_persistente_cambia_el_modelo_del_experto_y_lo_registra(monkeypatch):

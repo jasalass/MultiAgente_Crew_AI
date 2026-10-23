@@ -40,8 +40,9 @@ def preparacion(eventos, en_curso):
     else:
         etiqueta = "Preparación · ⏳ el Asesor normativo consulta la ley y la memoria"
     with st.expander(etiqueta, expanded=en_curso and not cuestionario):
-        if panel.get("panel"):
-            st.write("**Panel:** " + ", ".join(panel["panel"]))
+        integrantes = panel.get("panel", panel.get("expertos", []))
+        if integrantes:
+            st.write("**Panel:** " + ", ".join(integrantes))
             if auditor and panel.get("modelos"):
                 st.caption(" · ".join(f"{rol}: {modelo}" for rol, modelo in panel["modelos"].items()))
         if contexto:

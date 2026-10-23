@@ -43,7 +43,7 @@ class TestMockApiClient(unittest.TestCase):
         self.assertEqual({d["estado"] for d in informe["decisiones"]}, {"firme", "condicionada", "abierta"})
         self.assertEqual(len(informe["adrs"]), 3)
         evaluaciones = [i for i in informe["cuestionario"]["items"] if i["tipo"] == "evaluacion"]
-        self.assertEqual(len(evaluaciones), 8)
+        self.assertEqual(len(evaluaciones), 9)
         self.assertTrue(2 <= len(informe["rondas"]) <= 3)
         self.assertEqual(len(informe["respuestas"]), len(informe["panel"]) * len(informe["rondas"]))
         self.assertGreaterEqual(len(informe["sesgo_por_modelo"]), 2)
@@ -171,6 +171,34 @@ class TestMockApiClient(unittest.TestCase):
             self.cliente.parsear_proyecto("# Sin objetivo")
         with self.assertRaises(ApiError):
             self.cliente.parsear_proyecto("")
+
+    def test_parseo_demo_ignora_comentarios_e_instrucciones_vacias(self):
+        texto = "# Proyecto\n## Objetivo y contexto\n<!-- Instrucción\nen varias líneas -->\nReservar horas.\n## Requisitos funcionales\n-\n- Notificar\n"
+        proyecto = self.cliente.parsear_proyecto(texto)
+        self.assertEqual(proyecto["objetivo"], "Reservar horas.")
+        self.assertEqual(proyecto["requisitos_funcionales"], ["Notificar"])
+        self.assertEqual(proyecto["texto_original"], texto)
+        with self.assertRaises(ApiError):
+            self.cliente.parsear_proyecto("# Plantilla\n## Objetivo\n<!-- Describe aquí el objetivo -->\n")
+
+    def test_viabilidad_deriva_de_sus_respuestas_y_se_exporta(self):
+        for indice, esperado in enumerate(("viable", "viable_con_condiciones", "no_viable")):
+            for modo in ("auto", "mono"):
+                with self.subTest(proyecto=indice, modo=modo):
+                    run_id = self.cliente.crear_run(config(indice, asignacion_modelos=modo))["run_id"]
+                    terminar(self.cliente, run_id)
+                    informe = self.cliente.obtener_informe(run_id)
+                    viabilidad = informe["viabilidad"]
+                    self.assertEqual(viabilidad["veredicto"], esperado)
+                    estadistica = next(e for e in informe["rondas"][-1]["estadisticas"] if e["item_id"] == "VIA-E1")
+                    for campo in ("mediana", "iqr", "consenso"):
+                        self.assertEqual(viabilidad[campo], estadistica[campo])
+                    md = self.cliente.obtener_informe(run_id, "md")
+                    self.assertIn("## Viabilidad global", md)
+                    self.assertIn(esperado, md)
+        run_id = self.cliente.crear_run(config(0, umbral_iqr=0))["run_id"]
+        terminar(self.cliente, run_id)
+        self.assertEqual(self.cliente.obtener_informe(run_id)["viabilidad"]["veredicto"], "en_discusion")
 
     def test_exporta_markdown_y_zip_con_tres_adrs(self):
         run_id = "demo-clinica-finalizado"

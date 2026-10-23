@@ -60,19 +60,22 @@ class MockService:
     @staticmethod
     def parsear_proyecto(texto):
         secciones = {}
-        actual = "objetivo"
-        nombre = "Proyecto importado"
+        actual = None
+        nombre = "Proyecto"
         mapa = {"objetivo": "objetivo", "contexto": "objetivo", "usuarios": "usuarios_volumen", "requisitos funcionales": "requisitos_funcionales",
                 "requisitos no funcionales": "requisitos_no_funcionales", "restricciones": "restricciones", "equipo": "equipo",
                 "integraciones": "integraciones", "decisiones": "decisiones_a_evaluar"}
-        for linea in texto.splitlines():
+        limpio = re.sub(r"<!--.*?-->", "", texto, flags=re.DOTALL)
+        for linea in limpio.splitlines():
             if re.match(r"^#\s+", linea):
                 nombre = re.sub(r"^#\s+", "", linea).strip() or nombre
             elif re.match(r"^#{2,6}\s+", linea):
                 titulo = _normalizar(re.sub(r"^#{2,6}\s+", "", linea))
                 actual = next((destino for prefijo, destino in mapa.items() if titulo.startswith(prefijo)), None)
-            elif actual and linea.strip():
-                secciones.setdefault(actual, []).append(re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", linea).strip())
+            elif actual:
+                valor = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", linea).strip()
+                if valor and valor not in "-*+":
+                    secciones.setdefault(actual, []).append(valor)
         resultado = {"nombre": nombre, "objetivo": "\n".join(secciones.get("objetivo", [])), "usuarios_volumen": "\n".join(secciones.get("usuarios_volumen", [])),
                      "equipo": "\n".join(secciones.get("equipo", [])), "texto_original": texto}
         for clave in ("requisitos_funcionales", "requisitos_no_funcionales", "restricciones", "integraciones", "decisiones_a_evaluar"):

@@ -21,7 +21,6 @@ from typing import Any
 from crewai import Agent, Crew, Process, Task
 
 from backend.delphi.moderador_prompts import BACKSTORY, GOAL, ROLE
-from backend.delphi.tools import DelphiStatsTool
 
 MAX_ITER_MODERADOR = 6
 MAX_ITER_EXPERTO = 3
@@ -32,11 +31,15 @@ SALIDA_ESPERADA_EXPERTO = (
 )
 
 
-def crear_moderador(llm: Any, herramientas: list[Any] | None = None) -> Agent:
-    """El manager_agent. CrewAI le fuerza allow_delegation=True al armar el Crew."""
+def crear_moderador(llm: Any) -> Agent:
+    """El manager_agent. CrewAI le fuerza allow_delegation=True al armar el Crew.
+
+    Sin herramientas: CrewAI rechaza un manager con tools ("Manager agent should not
+    have tools"). Por eso DelphiStatsTool y el anonimizador los invoca engine.py
+    directamente, lo cual además hace los números deterministas.
+    """
     return Agent(
         role=ROLE, goal=GOAL, backstory=BACKSTORY, llm=llm,
-        tools=herramientas if herramientas is not None else [DelphiStatsTool()],
         allow_delegation=True, max_iter=MAX_ITER_MODERADOR, memory=False, verbose=False,
     )
 

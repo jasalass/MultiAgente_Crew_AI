@@ -27,3 +27,8 @@ def test_expertos_aislados():
     assert all(not w.allow_delegation for w in workers)
     assert all(t.context == [] for t in tareas)
     assert crew.memory is False and crew.cache is False
+
+
+def test_moderador_sin_herramientas():
+    # CrewAI lanza excepción si el manager_agent tiene tools; el kickoff real lo descubrió.
+    assert not crear_moderador(_llm()).tools

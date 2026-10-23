@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from backend.delphi.adr import escribir_adrs
+from backend.delphi.asignacion import asignar_modelos
 from backend.delphi.engine import DelphiEngine, RunCancelado, RunError
 from backend.delphi.experts import NUCLEO
 from backend.delphi.models import ConfigRun, Proyecto
@@ -55,25 +56,45 @@ def cargar_proyecto(ruta: Path) -> Proyecto:
 
 # --- LLM reales: un bloque LLM_*_<NOMBRE> del .env por modelo --------------------------
 
-def llms_desde_env(expertos: list[str]):
+def llms_desde_env(expertos: list[str], rotacion: int = 0):
+    """Lee el .env (ver su cabecera): bloques MODERADOR_<n> y un bloque por modelo experto."""
     from crewai import LLM
     try:
         from dotenv import load_dotenv
         load_dotenv(RAIZ / ".env")
     except ModuleNotFoundError:
         pass
-    nombres = sorted(k.removeprefix("LLM_API_KEY_") for k in os.environ if k.startswith("LLM_API_KEY_"))
-    # Se omiten los bloques sin completar (key vacía o modelo "<...>" de la plantilla).
-    nombres = [n for n in nombres if os.environ[f"LLM_API_KEY_{n}"].strip()
-               and "<" not in os.environ.get(f"LLM_MODEL_{n}", "<")]
-    if not nombres:
-        raise SystemExit("No hay bloques LLM_API_KEY_<NOMBRE> en el .env (ver README §3). Prueba con --mock.")
-    modelos = [LLM(model=f"openai/{os.environ[f'LLM_MODEL_{n}']}", base_url=os.environ[f"LLM_BASE_URL_{n}"],
-                   api_key=os.environ[f"LLM_API_KEY_{n}"]) for n in nombres]
-    asignado = {e: modelos[i % len(modelos)] for i, e in enumerate(expertos)}
-    asignado["moderador"] = modelos[-1]
+    url_groq = os.environ.get("LLM_BASE_URL_GROQ", "")
+
+    def crear(nombre: str, modelo: str) -> "LLM":
+        extra: dict = {}
+        # Modelos de razonamiento (OpenRouter): LLM_REASONING_<N>=low|medium|high limita lo que
+        # "piensan" antes de responder; sin esto pueden agotar los tokens y devolver JSON vacío.
+        esfuerzo = os.environ.get(f"LLM_REASONING_{nombre}", "").strip()
+        if esfuerzo:
+            extra["extra_body"] = {"reasoning": {"effort": esfuerzo}}
+        tope = os.environ.get(f"LLM_MAX_TOKENS_{nombre}", "").strip()
+        if tope:
+            extra["max_tokens"] = int(tope)
+        return LLM(model=f"openai/{modelo}", api_key=os.environ[f"LLM_API_KEY_{nombre}"],
+                   base_url=os.environ.get(f"LLM_BASE_URL_{nombre}", url_groq), **extra)
+
+    bloques = sorted(k.removeprefix("LLM_API_KEY_") for k in os.environ if k.startswith("LLM_API_KEY_"))
+    bloques = [b for b in bloques if os.environ[f"LLM_API_KEY_{b}"].strip()]   # sin key: se omite
+    # Moderadores: mismo modelo, una key distinta cada uno (se rotan entre expertos).
+    modelo_mod = os.environ.get("LLM_MODEL_MODERADOR", "")
+    moderadores = [crear(b, modelo_mod) for b in bloques if b.startswith("MODERADOR_")]
+    if not moderadores:
+        raise SystemExit("Faltan los bloques LLM_API_KEY_MODERADOR_<n> y LLM_MODEL_MODERADOR en el .env.")
+    # Expertos: un bloque por modelo; se omiten los que aún tienen el modelo sin completar.
+    modelos = [crear(b, os.environ[f"LLM_MODEL_{b}"]) for b in bloques
+               if not b.startswith("MODERADOR_") and "<" not in os.environ.get(f"LLM_MODEL_{b}", "<")]
+    if not modelos:
+        raise SystemExit("No hay bloques de expertos completos en el .env (ver su cabecera).")
+    asignado = asignar_modelos(expertos, modelos, rotacion)   # sin roles afines en el mismo modelo
+    asignado["moderador"] = moderadores
     if len(modelos) < 2:
-        print("AVISO: un solo modelo disponible: panel mono-modelo, riesgo de falso consenso.")
+        print("AVISO: un solo modelo de experto: panel mono-modelo, riesgo de falso consenso.")
     return lambda agente_id: asignado[agente_id]
 
 
@@ -139,6 +160,9 @@ def main() -> None:
     ap.add_argument("--expertos", nargs="+", default=list(NUCLEO), help="ids del panel (por defecto, el núcleo)")
     ap.add_argument("--min-rondas", type=int, default=2)
     ap.add_argument("--max-rondas", type=int, default=3)
+    ap.add_argument("--rotacion", type=int, default=None,
+                    help="desplaza la asignación de modelos; por defecto cambia en cada ejecución")
+    ap.add_argument("--pausa", type=float, default=10.0, help="segundos entre expertos (modelos reales)")
     ap.add_argument("--mock", action="store_true", help="LLM falsos: no usa keys ni red")
     ap.add_argument("--semilla", type=int, default=7, help="semilla del modo --mock")
     args = ap.parse_args()
@@ -149,7 +173,13 @@ def main() -> None:
         ejecutar, moderador = mock(args.semilla)
         motor = DelphiEngine(lambda _id: SimpleNamespace(model=f"mock-{hash(_id) % 3}"), ejecutar, moderador)
     else:
-        motor = DelphiEngine(llms_desde_env(args.expertos))
+        runs = RAIZ / "outputs" / "runs"
+        rotacion = args.rotacion if args.rotacion is not None else (len(list(runs.iterdir())) if runs.exists() else 0)
+        llm_para = llms_desde_env(args.expertos, rotacion)
+        print(f"Asignación de modelos (rotación {rotacion}):")
+        for e in args.expertos:
+            print(f"  {e:13} -> {llm_para(e).model}")
+        motor = DelphiEngine(llm_para, pausa_entre_expertos=args.pausa)
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     eventos: list = []

@@ -12,6 +12,7 @@ Al terminar las rondas arma el InformeDelphi (decisiones.py, adr.py, bias.py).
 from __future__ import annotations
 
 import itertools
+import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -82,26 +83,85 @@ def decidir_continuar(ronda: int, config: ConfigRun, pct_consenso: float, establ
 
 # --- Ejecución real con CrewAI (se puede reemplazar al probar) ----------------------
 
-def ejecutar_ronda_crewai(moderador_llm: Any, expertos: list[dict], llms: dict[str, Any],
-                          prompts: dict[str, str], step_callback=None, task_callback=None) -> dict[str, str]:
-    """Un Crew jerárquico: el Moderador delega a cada experto. Devuelve texto crudo por id."""
+def elegir_moderador(moderadores: Any, n: int) -> Any:
+    """Rota entre varios LLM de Moderador (o devuelve el único que haya)."""
+    if isinstance(moderadores, (list, tuple)):
+        return moderadores[n % len(moderadores)]
+    return moderadores
+
+
+def _es_limite_de_tasa(error: Exception) -> bool:
+    """429/rate limit: esperar y reintentar sirve. Un 413 (petición mayor que el tope) no."""
+    texto = str(error).lower()
+    return "429" in texto or "rate limit" in texto or "rate_limit" in texto
+
+
+def con_reintentos(accion: Callable[[], Any], intentos: int = 3, espera: float = 30.0,
+                   dormir: Callable[[float], None] = time.sleep) -> Any:
+    """Reintenta ante límites de tasa con espera progresiva (30 s, 60 s, ...)."""
+    for n in range(intentos):
+        try:
+            return accion()
+        except Exception as error:
+            if n == intentos - 1 or not _es_limite_de_tasa(error):
+                raise
+            dormir(espera * 2 ** n)
+
+
+def ejecutar_ronda_crewai(moderadores: Any, expertos: list[dict], llms: dict[str, Any],
+                          prompts: dict[str, str], step_callback=None, task_callback=None,
+                          pausa: float = 0.0, inicio: int = 0,
+                          dormir: Callable[[float], None] = time.sleep) -> dict[str, str]:
+    """Un Crew jerárquico POR experto: el Moderador delega en él. Devuelve texto crudo por id.
+
+    Con un solo Crew para todo el panel, el Moderador acumula en su contexto el prompt y la
+    respuesta de cada experto y rebasa el límite de tokens por minuto de los planes gratuitos.
+    Un Crew por experto mantiene su historial corto y permite repartir el tráfico entre
+    varios modelos de Moderador (`moderadores` puede ser una lista; se rota desde `inicio`,
+    que el motor avanza entre rondas para no volver a usar enseguida la misma key).
+    Entre experto y experto espera `pausa` segundos; ante un 429 reintenta con espera.
+    """
     from backend.delphi.crew import crear_crew_ronda, crear_moderador, crear_tarea_experto, crear_worker
-    workers = {e["id"]: crear_worker(e, llms[e["id"]]) for e in expertos}
-    tareas = {e["id"]: crear_tarea_experto(workers[e["id"]], prompts[e["id"]], e["role"]) for e in expertos}
-    crew = crear_crew_ronda(crear_moderador(moderador_llm), list(workers.values()),
-                            list(tareas.values()), step_callback, task_callback)
-    crew.kickoff()
-    return {eid: (t.output.raw if t.output else "") for eid, t in tareas.items()}
+    salida: dict[str, str] = {}
+    for n, e in enumerate(expertos):
+        def correr(e=e, n=n):
+            worker = crear_worker(e, llms[e["id"]])      # Crew y tarea nuevos en cada intento
+            tarea = crear_tarea_experto(worker, prompts[e["id"]], e["role"])
+            crew = crear_crew_ronda(crear_moderador(elegir_moderador(moderadores, inicio + n)),
+                                    [worker], [tarea], step_callback, task_callback)
+            crew.kickoff()
+            return tarea.output.raw if tarea.output else ""
+        salida[e["id"]] = con_reintentos(correr, dormir=dormir)
+        if pausa:
+            dormir(pausa)
+    return salida
+
+
+def _proyecto_para_experto(proyecto: Any) -> dict[str, Any]:
+    """Datos del proyecto sin repetir contenido en el prompt.
+
+    `texto_original` duplica los campos ya extraídos (casi el doble de tokens por experto). Solo
+    se conserva si el parser no extrajo nada más allá del nombre y el objetivo.
+    """
+    datos = proyecto.model_dump()
+    estructurados = [k for k, v in datos.items() if k not in ("nombre", "objetivo", "texto_original") and v]
+    if estructurados:
+        datos.pop("texto_original", None)
+    return datos
 
 
 class DelphiEngine:
     def __init__(self, llm_para: Callable[[str], Any],
                  ejecutar_ronda: Callable[..., dict[str, str]] = ejecutar_ronda_crewai,
-                 llamar_moderador: Callable[[str], str] | None = None):
+                 llamar_moderador: Callable[[str], str] | None = None,
+                 pausa_entre_expertos: float = 0.0):
         """llm_para(id) -> LLM; será ModelPool.get_llm. Usa "moderador" para el Moderador."""
         self._llm_para = llm_para
         self._ejecutar_ronda = ejecutar_ronda
-        self._llamar_moderador = llamar_moderador or (lambda prompt: str(self._llm_para("moderador").call(prompt)))
+        self._pausa = pausa_entre_expertos
+        self._turno = 0   # sigue la rotación de Moderadores entre rondas
+        self._llamar_moderador = llamar_moderador or (
+            lambda prompt: str(elegir_moderador(self._llm_para("moderador"), 0).call(prompt)))
 
     # ----- eventos -----
     def _emitir(self, tipo: str, payload: dict, ronda: int | None = None) -> None:
@@ -154,11 +214,14 @@ class DelphiEngine:
             prompts = {e["id"]: self._prompt_experto(e, proyecto, cuestionario, ronda,
                                                      previas.get(e["id"]), feedback)
                        for e in expertos}
-            crudo = self._ejecutar_ronda(self._llm_para("moderador"), expertos, llms, prompts)
+            crudo = self._ejecutar_ronda(self._llm_para("moderador"), expertos, llms, prompts,
+                                         pausa=self._pausa, inicio=self._turno)
+            self._turno += len(expertos)
 
             actuales: list[RespuestaExperto] = []
             for e in expertos:
-                salida = self._validar_salida(crudo.get(e["id"], ""), e["id"], cuestionario)
+                salida = self._salida_con_reintento(crudo.get(e["id"], ""), e["id"], prompts[e["id"]],
+                                                    llms[e["id"]], cuestionario)
                 r = RespuestaExperto(experto_id=anon[e["id"]], rol=e["id"],
                                      modelo=str(getattr(llms[e["id"]], "model", "desconocido")),
                                      ronda=ronda, respuestas=salida.respuestas,
@@ -208,7 +271,7 @@ class DelphiEngine:
     # ----- piezas -----
     def _prompt_experto(self, experto: dict, proyecto: Any, cuestionario: Cuestionario, ronda: int,
                         anterior: RespuestaExperto | None, feedback: dict | None) -> str:
-        contexto: dict[str, Any] = {"proyecto": proyecto.model_dump(),
+        contexto: dict[str, Any] = {"proyecto": _proyecto_para_experto(proyecto),
                                     "cuestionario": cuestionario.model_dump(), "ronda": ronda}
         if ronda > 1:
             contexto["respuesta_anterior"] = {
@@ -220,6 +283,25 @@ class DelphiEngine:
             return construir_prompt_ronda_1(experto, contexto["proyecto"], contexto["cuestionario"])
         return construir_prompt_ronda_k(experto, contexto["proyecto"], contexto["cuestionario"],
                                         contexto["respuesta_anterior"], feedback, ronda)
+
+    def _salida_con_reintento(self, texto: str, experto_id: str, prompt: str, llm: Any,
+                              cuestionario: Cuestionario) -> _SalidaExperto:
+        """Valida la respuesta del experto; si falla, un único reintento con el error (README §4.3).
+
+        Pasa con modelos pequeños que omiten ítems (p. ej. contestan solo las evaluaciones y se saltan
+        las alternativas). El reintento llama directo al LLM del experto, con el mismo prompt: no
+        añade información de otros expertos, así que no rompe la independencia.
+        """
+        try:
+            return self._validar_salida(texto, experto_id, cuestionario)
+        except ValueError as error:
+            if not hasattr(llm, "call"):
+                raise
+            esperados = ", ".join(sorted(i.id for i in cuestionario.items))
+            segundo = str(llm.call(
+                f"{prompt}\n\nTu respuesta anterior no fue válida: {error}\n"
+                f"Responde de nuevo SOLO el JSON y con TODOS estos item_id, exactamente una vez cada uno: {esperados}."))
+            return self._validar_salida(segundo, experto_id, cuestionario)
 
     def _validar_salida(self, texto: str, experto_id: str, cuestionario: Cuestionario) -> _SalidaExperto:
         try:

@@ -98,3 +98,37 @@ def test_reglas_de_continuacion():
     assert decidir_continuar(3, cfg, 0.2, False, True) == (False, "max_rondas")
     assert decidir_continuar(2, cfg, 0.2, False, False) == (False, "moderador")
     assert decidir_continuar(2, cfg, 0.2, False, True) == (True, "moderador")
+
+
+def test_moderadores_rotan_entre_modelos():
+    from backend.delphi.engine import elegir_moderador
+    assert [elegir_moderador(["A", "B"], n) for n in range(5)] == ["A", "B", "A", "B", "A"]
+    assert elegir_moderador("unico", 3) == "unico"
+
+
+def test_el_prompt_no_repite_el_texto_original():
+    from backend.delphi.engine import _proyecto_para_experto
+    solo_texto = Proyecto(nombre="P", objetivo="O", texto_original="# P\nlibre")
+    assert "texto_original" in _proyecto_para_experto(solo_texto)            # nada estructurado: se conserva
+    estructurado = Proyecto(nombre="P", objetivo="O", restricciones=["6 meses"], texto_original="# P\n...")
+    assert "texto_original" not in _proyecto_para_experto(estructurado)
+
+
+def test_reintenta_una_vez_si_el_experto_omite_items():
+    completo = _salida({"ARQ-E1": 4, "ARQ-D1-a": 5, "ARQ-D1-b": 2})
+    parcial = _salida({"ARQ-E1": 4})                                  # se salta las alternativas
+    llamadas = []
+
+    class LLMDistraido:
+        model = "distraido"
+
+        def call(self, prompt):
+            llamadas.append(prompt)
+            return completo                                           # el reintento sí responde todo
+
+    motor = _motor([CONSENSO])
+    motor._ejecutar_ronda = lambda *a, **k: {e: parcial for e in PANEL}
+    motor._llm_para = lambda _id: LLMDistraido()
+    informe, _ = _correr(motor)
+    assert len(llamadas) == 5 * 2 and "no fue válida" in llamadas[0]   # 1 reintento por experto y ronda
+    assert len(informe.respuestas[0].respuestas) == 3

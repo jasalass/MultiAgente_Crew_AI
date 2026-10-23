@@ -1,6 +1,6 @@
 # Entrega de Jenaro: panel de expertos, sesgo y frontend
 
-Implementación local en `feat/panel-y-frontend`, basada en los contratos del README §4. No se creó ni modificó `backend/delphi/models.py`: ese archivo sigue siendo responsabilidad compartida. La API, ModelPool, estadísticas del motor y orquestación real corresponden a Juan y Pamela.
+Componentes de Jenaro en `feat/panel-y-frontend`, integrados con la API y el motor incorporados desde `main` (`4c973b6`). Se conservan los contratos del README §4. La revisión del 23 de octubre de 2026 no modifica `backend/delphi/models.py`, que sigue siendo responsabilidad compartida.
 
 ## Probar la demo
 
@@ -66,7 +66,7 @@ feedback = sintetizar_argumentos(respuestas_de_una_ronda, cuestionario)
 sesgos = calcular_sesgo(todas_las_respuestas, cuestionario)
 ```
 
-Las funciones reciben diccionarios o instancias Pydantic y devuelven diccionarios con los campos acordados. Juan/Pamela pueden convertirlos con `Experto.model_validate(...)` y `SesgoModelo.model_validate(...)` cuando estén disponibles los modelos compartidos.
+Las funciones reciben diccionarios o instancias Pydantic y devuelven diccionarios con los campos acordados. Los modelos compartidos están disponibles: el motor utiliza estas funciones y convierte sus resultados mediante los contratos Pydantic.
 
 Para una ronda posterior:
 
@@ -81,7 +81,7 @@ prompt = construir_prompt_ronda_k(
 
 El JSON pedido al LLM contiene **solo** `respuestas` y `riesgos_detectados`. El motor agrega `experto_id`, `rol`, `modelo` y `ronda` antes de validar `RespuestaExperto`; el LLM no genera metadatos de auditoría. La respuesta propia debe cubrir todos los ítems y pertenecer al mismo rol y a la ronda anterior. El feedback requiere estadísticas completas de todos los ítems.
 
-La herramienta anónima produce una cadena JSON de resúmenes. Pamela debe unirla por `item_id` a mediana, Q1, Q3, IQR y consenso calculados por `stats.py`. No se pasan a otro experto las respuestas de sus pares ni sus metadatos. El motor también debe crear las tareas sin `context`, desactivar memoria y delegación de los workers y conservar los originales solo para auditoría. El prompt y `guard_independencia` no reemplazan ese aislamiento.
+La herramienta anónima produce una cadena JSON de resúmenes. El motor ya une la síntesis por `item_id` a mediana, Q1, Q3, IQR y consenso calculados por `stats.py`. Las tareas de expertos se ejecutan aisladas, sin compartir respuestas ni metadatos de sus pares. El prompt y `guard_independencia` complementan el aislamiento de CrewAI.
 
 La demo funciona sin CrewAI. La ruta de `BaseTool` real se verificó en un entorno aislado con **CrewAI 1.15.28**. Para usar esa herramienta en el motor, instalar CrewAI junto con las dependencias de integración que acuerde el equipo. Referencia de la API: [herramientas personalizadas de CrewAI](https://docs.crewai.com/en/learn/create-custom-tools).
 
@@ -99,11 +99,12 @@ Cuando la API, el motor y las credenciales estén configurados:
 
 ```powershell
 .venv\Scripts\python.exe -m scripts.experimento_sesgo --api-url http://localhost:8000 --timeout 1800
+# Para fijar el modelo del control, añadir --modelo-mono con su nombre exacto de GET /modelos.
 # O bien usar los tres archivos de data/proyectos/:
 .venv\Scripts\python.exe -m scripts.experimento_sesgo --api-url http://localhost:8000 --proyectos data/proyectos/clinica_reservas.md data/proyectos/migracion_erp.md data/proyectos/marketplace_ia.md
 ```
 
-La segunda orden usa los tres proyectos de `data/proyectos/`. Se compara IQR medio de la primera ronda, primera ronda con consenso global, alternativas recomendadas y estados. Un cierre por estabilidad no se cuenta como consenso. Se informa si los cuestionarios difieren y si hay decisiones sin pareja. Se conserva el mismo proyecto y configuración de panel entre ambos modos.
+El script usa por defecto los tres proyectos de `data/proyectos/`; la segunda orden los indica explícitamente. Se compara IQR medio de la primera ronda, primera ronda con consenso global, alternativas recomendadas y estados. Un cierre por estabilidad no se cuenta como consenso. Se informa si los cuestionarios difieren y si hay decisiones sin pareja. Se conserva el mismo proyecto y configuración de panel entre ambos modos, y el modelo mono se fija antes de iniciar los análisis. Una API con `DELPHI_SIMULADO=true` exporta sus resultados como **API SIMULADA**.
 
 ## Pruebas y límites
 
@@ -117,4 +118,6 @@ La sugerencia de panel usa heurísticas y se puede editar. Maneja exclusiones si
 
 Las medidas de sesgo son descriptivas. Se toma el último voto de cada experto/ítem, incluso si cambió de modelo, y se compara con la mediana del mismo ítem. Para estudiar un efecto del modelo se necesitan repeticiones con roles/asignaciones rotadas; una sola comparación no separa causalmente esos factores.
 
-Queda pendiente la integración de extremo a extremo con API/motor reales, ajustar prompts con modelos reales, ejecutar el control real y revisar los resultados con el equipo. Las claves personales van únicamente en `.env`; no se necesitan para presentar esta demo.
+La integración frontend → HTTP → API → motor → persistencia ya se verificó con LLM ficticios, incluidos los tres proyectos canónicos, descargas, historial y cancelación. La demo local también incorpora el nuevo veredicto de viabilidad. Ver [evidencia y pendientes de la validación](validacion_jenaro.md).
+
+En esta copia no hay modelos reales configurados. Quedan pendientes comprobar los prompts y el flujo con credenciales válidas, ejecutar el control con modelos reales, revisar las decisiones entre los tres y preparar la presentación. Las claves personales van únicamente en `.env`; no se necesitan para la validación simulada.

@@ -1,13 +1,17 @@
 """Pruebas deterministas de medidas descriptivas y del control mono/auto."""
 
 import csv
+from contextlib import redirect_stdout
+import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
 
 from backend.delphi.bias import calcular_sesgo
-from scripts.experimento_sesgo import comparar_informes, ejecutar_run, guardar_comparacion
+from scripts.experimento_sesgo import (PROYECTOS_CONTROL, cargar_proyectos, comparar_informes,
+                                     ejecutar_run, elegir_modelo_mono, guardar_comparacion,
+                                     main, origen_resultados)
 
 
 def cuestionario():
@@ -107,6 +111,16 @@ class BiasTests(unittest.TestCase):
             with self.subTest(puntaje=puntaje), self.assertRaises(ValueError):
                 calcular_sesgo([respuesta("a", "m1", {"E1": puntaje})], cuestionario())
 
+    def test_real_shared_pydantic_contracts_remain_compatible(self):
+        from backend.delphi.models import Cuestionario, RespuestaExperto, SesgoModelo
+
+        preguntas = Cuestionario.model_validate(cuestionario())
+        datos = [RespuestaExperto.model_validate(respuesta("a", "m1", {"E1": 5, "D1-a": 3})),
+                 RespuestaExperto.model_validate(respuesta("b", "m2", {"E1": 3, "D1-a": 1}))]
+        resultado = [SesgoModelo.model_validate(fila) for fila in calcular_sesgo(datos, preguntas)]
+        self.assertEqual(resultado[0].puntaje_medio, 4)
+        self.assertEqual(resultado[0].preferencias, {"Monolito": 1})
+
 
 class ComparacionTests(unittest.TestCase):
     def test_mean_first_round_iqr_and_first_actual_consensus(self):
@@ -173,6 +187,69 @@ class ComparacionTests(unittest.TestCase):
         ambiguo["decisiones"] *= 2
         with self.assertRaisesRegex(ValueError, "ambigua"):
             comparar_informes(ambiguo, informe())
+
+    def test_http_simulated_reports_are_prominently_labeled_in_every_export(self):
+        comparacion = {**comparar_informes(informe(), informe()), "run_mono": "m", "run_auto": "a"}
+        evidencias = [{"informe": {"avisos": ["Ejecución simulada: LLM falsos, los resultados son ficticios."]}}]
+        self.assertIn("API SIMULADA", origen_resultados(evidencias, mock=False))
+        with tempfile.TemporaryDirectory() as carpeta:
+            destino = Path(carpeta)
+            guardar_comparacion([comparacion], destino, mock=False, evidencias=evidencias)
+            self.assertIn("DATOS SIMULADOS", (destino / "comparacion.md").read_text(encoding="utf-8"))
+            self.assertIn("API SIMULADA", (destino / "comparacion.csv").read_text(encoding="utf-8-sig"))
+            self.assertIn("API SIMULADA", json.loads((destino / "ejecuciones.json").read_text(encoding="utf-8"))["origen"])
+        self.assertEqual(origen_resultados([{"informe": {"avisos": ["panel mono-modelo"]}}], mock=False), "API")
+        self.assertIn("MIXTO", origen_resultados(evidencias + [{"informe": {"avisos": []}}], mock=False))
+
+
+class ExperimentoIntegracionTests(unittest.TestCase):
+    def test_canonical_files_are_read_before_parse_requests(self):
+        class Parser:
+            def __init__(self):
+                self.recibidos = []
+
+            def parsear_proyecto(self, texto):
+                self.recibidos.append(texto)
+                return {"texto_original": texto}
+
+        cliente = Parser()
+        with tempfile.TemporaryDirectory() as carpeta:
+            directorio = Path(carpeta)
+            (directorio / PROYECTOS_CONTROL[0]).write_text("# Primero", encoding="utf-8")
+            with self.assertRaises(FileNotFoundError):
+                cargar_proyectos(cliente, directorio=directorio)
+            self.assertEqual(cliente.recibidos, [])
+            for nombre in PROYECTOS_CONTROL:
+                (directorio / nombre).write_text("# " + nombre, encoding="utf-8-sig")
+            proyectos = cargar_proyectos(cliente, directorio=directorio)
+        self.assertEqual([p["texto_original"] for p in proyectos], ["# " + n for n in PROYECTOS_CONTROL])
+
+    def test_control_model_must_exist_before_starting_runs(self):
+        modelos = [{"nombre": "a"}, {"nombre": "b"}]
+        self.assertEqual(elegir_modelo_mono(modelos, None), "a")
+        self.assertEqual(elegir_modelo_mono(modelos, "b"), "b")
+        with self.assertRaisesRegex(ValueError, "no está disponible"):
+            elegir_modelo_mono(modelos, "desconocido")
+        with self.assertRaisesRegex(ValueError, "no tiene modelos"):
+            elegir_modelo_mono([], None)
+
+    def test_six_mock_runs_use_canonical_inputs_and_selected_mono_model(self):
+        modelo = "demo-qwen-ficticio"
+        raiz = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as carpeta, redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--mock", "--modelo-mono", modelo, "--salida", carpeta]), 0)
+            evidencia = json.loads((Path(carpeta) / "ejecuciones.json").read_text(encoding="utf-8"))
+            parcial = json.loads((Path(carpeta) / "ejecuciones_parciales.json").read_text(encoding="utf-8"))
+        self.assertIn("mock del frontend", parcial["origen"])
+        self.assertEqual(len(evidencia["ejecuciones"]), 6)
+        for n, nombre in enumerate(PROYECTOS_CONTROL):
+            mono, auto = evidencia["ejecuciones"][n * 2:n * 2 + 2]
+            original = (raiz / "data" / "proyectos" / nombre).read_text(encoding="utf-8-sig")
+            self.assertEqual(mono["config"]["proyecto"]["texto_original"], original)
+            self.assertEqual(mono["config"]["proyecto"], auto["config"]["proyecto"])
+            self.assertEqual(set(mono["config"]["modelos_manual"].values()), {modelo})
+            self.assertIsNone(auto["config"]["modelos_manual"])
+            self.assertEqual({r["modelo"] for r in mono["informe"]["respuestas"]}, {modelo})
 
 
 class ClienteFalso:

@@ -26,13 +26,15 @@ def _respuesta(evento):
 
 def preparacion(eventos, en_curso):
     """Panel y cuestionario. Abierto solo mientras el Moderador escribe el cuestionario."""
-    cuestionario = next((e["payload"] for e in eventos if e["tipo"] == "cuestionario_generado"), None)
+    contenido = next((e["payload"] for e in eventos if e["tipo"] == "cuestionario_generado"), None)
+    cuestionario = contenido.get("cuestionario", contenido) if contenido else None
     panel = next((e["payload"] for e in eventos if e["tipo"] == "panel_confirmado"), {})
     etiqueta = ("Preparación · ✔ panel y cuestionario listos" if cuestionario
                 else "Preparación · ⏳ el Moderador está escribiendo el cuestionario")
     with st.expander(etiqueta, expanded=en_curso and not cuestionario):
-        if panel.get("panel"):
-            st.write("**Panel:** " + ", ".join(panel["panel"]))
+        integrantes = panel.get("panel", panel.get("expertos", []))
+        if integrantes:
+            st.write("**Panel:** " + ", ".join(integrantes))
             if auditor and panel.get("modelos"):
                 st.caption(" · ".join(f"{rol}: {modelo}" for rol, modelo in panel["modelos"].items()))
         if cuestionario:

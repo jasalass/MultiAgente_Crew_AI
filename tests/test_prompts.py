@@ -29,6 +29,12 @@ class PromptsTests(unittest.TestCase):
         self.assertIn("1 a 3 frases", prompt)
         self.assertTrue(guard_independencia(contexto))
 
+    def test_id_no_estructurado_se_rechaza_antes_de_consultar_al_experto(self):
+        cuestionario = copy.deepcopy(CUESTIONARIO)
+        cuestionario["items"][0]["id"] = "eval-1"
+        with self.assertRaisesRegex(ValueError, "item_id no cumple el formato"):
+            construir_prompt_ronda_1("arquitectura", PROYECTO, cuestionario)
+
     def test_ronda_posterior_conserva_solo_respuesta_propia_y_feedback_neutral(self):
         prompt = construir_prompt_ronda_k("arquitectura", PROYECTO, CUESTIONARIO, ANTERIOR, FEEDBACK)
         contexto = contexto_del_prompt(prompt)

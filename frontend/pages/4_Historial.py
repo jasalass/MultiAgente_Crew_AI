@@ -1,5 +1,5 @@
 import streamlit as st
-from frontend.ui import cliente, formatear_fecha, tarjetas_decisiones
+from frontend.ui import cliente, formatear_fecha, tarjetas_decisiones, veredicto_viabilidad
 
 st.header("Historial / Comparar")
 api = cliente()
@@ -30,6 +30,7 @@ for columna, run_id, informe in zip((a, b), (primero, segundo), informes):
         estado = next(r for r in finalizados if r["run_id"] == run_id)
         st.subheader(informe["proyecto"]["nombre"])
         st.caption(f"Modo: {estado['config']['asignacion_modelos']} · panel: {', '.join(informe['panel'])}")
+        veredicto_viabilidad(informe)
         rondas = informe.get("rondas", [])
         st.metric("Rondas ejecutadas", len(rondas))
         st.metric("Consenso final", f"{rondas[-1]['porcentaje_consenso']:.0%}" if rondas else "Sin datos")

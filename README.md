@@ -60,6 +60,17 @@ Es otra IA que organiza el proceso: lee el proyecto, decide cuáles son las preg
 - **No puede alterar las respuestas:** el programa las toma directamente del experto.
 - **No hace los cálculos ni decide el resultado:** eso lo hace el programa con reglas fijas, siempre igual.
 
+### El Asesor normativo: buscar antes de opinar
+
+Antes de que el panel opine, dos IA más preparan una **ficha de contexto**:
+
+- Un **investigador** decide si el proyecto maneja datos personales (de pacientes, clientes, empleados…). Si los maneja, **busca en la Ley 21.719** de protección de datos personales los artículos que aplican, y **revisa los análisis anteriores** del sistema para ver si hubo proyectos parecidos y qué riesgos tuvieron.
+- Un **redactor** escribe la ficha con las citas de los artículos y la guarda.
+
+La búsqueda en la ley reutiliza el trabajo de la **Evaluación Parcial 1** del equipo, que dividió la ley en 140 fragmentos por artículo. La búsqueda es **semántica**: encuentra el artículo por su significado, aunque no use las mismas palabras. Por ejemplo, "datos de salud de pacientes" encuentra el artículo de datos sensibles.
+
+El programa **revisa la ficha antes de usarla**: si cita un artículo que la búsqueda no devolvió, o habla de análisis anteriores sin haberlos consultado, lo marca como "no verificado". Después, todos los expertos reciben la misma ficha, que es material de consulta y no la opinión de otro experto. Cada análisis terminado queda guardado en la **memoria del sistema** para los siguientes.
+
 ### Un análisis paso a paso (ejemplo real)
 
 ![Un análisis paso a paso: qué hace la persona, las pantallas, el motor, el Moderador y los expertos en cada uno de los 10 pasos](docs/img/arquitectura-2-paso-a-paso.jpg)
@@ -138,6 +149,131 @@ Un análisis completo tarda **unos 5 a 10 minutos**: los expertos responden al m
 
 ---
 
+## Guía de estudio
+
+Esta sección es para estudiar el proyecto y preparar la defensa. Cada concepto se explica en tres partes: **qué es**, **cómo se usa aquí** y **dónde verlo en el código**. Al final hay un recorrido de un análisis por los archivos y preguntas probables de la evaluación, con dónde está la respuesta.
+
+**Cómo leer el README:** si es la primera vez, lean la sección 0 y luego esta guía. Las secciones 1 a 4 son la referencia técnica (reglas, arquitectura, modelos y contratos), la 8 explica cómo ejecutar todo y la 9 tiene los resultados con modelos reales. La [§1.8](#18-agentes-herramientas-memoria-y-planificación-indicadores-il21-a-il24) relaciona cada indicador de la rúbrica con el código.
+
+### Los conceptos, uno por uno
+
+#### 1. Modelo de lenguaje (LLM) y prompt
+
+- **Qué es:** un programa que recibe un texto (el *prompt*) y genera una respuesta. No "sabe" nada fijo: responde según lo que aprendió y según lo que dice el prompt.
+- **Cómo se usa aquí:** cada experto, el Moderador y el Asesor son llamadas a un LLM con un prompt distinto. Se les pide responder en **JSON**, así el programa puede leer las notas sin interpretar texto libre.
+- **En el código:** `config.py` (`crear_llm`) crea cada LLM a partir del `.env`, y `llm_io.py` (`extraer_json`, `validar`) saca el JSON de la respuesta, quita el razonamiento (`<think>`, `<thought>`) y lo valida con Pydantic.
+
+#### 2. Agente, tarea y equipo (CrewAI)
+
+- **Qué es:** en CrewAI, un **Agent** es un LLM con un rol (`role`), un objetivo (`goal`), una historia (`backstory`) que define su forma de pensar, un límite de intentos (`max_iter`) y, opcionalmente, herramientas (`tools`). Una **Task** es un encargo con su descripción y el resultado esperado (`expected_output`). Un **Crew** junta agentes y tareas y las ejecuta según un **Process**.
+- **Cómo se usa aquí:** hay dos tipos de equipo, los mismos que vimos en clase:
+  - **`Process.hierarchical`** (como `4-multiagent_crewai_hierarchical.py`): un jefe (`manager_agent`) decide a quién delegar. Lo usamos en **cada ronda**: el **Moderador** es el jefe y cada **experto** es un trabajador.
+  - **`Process.sequential`** (como `3-multiagent_crewai_full.py`): las tareas corren en orden y la segunda recibe la primera con `context=[tarea_anterior]`. Lo usamos en el **Asesor normativo**: primero investiga y después redacta.
+- **En el código:** `crew.py` (`crear_moderador`, `crear_worker`, `crear_tarea_experto`, `crear_crew_ronda`) y `asesor.py` (`crear_asesor`, `crear_redactor`, `preparar_ficha`).
+
+#### 3. Herramientas (tools)
+
+- **Qué es:** funciones que un agente puede **decidir** llamar por su cuenta. En CrewAI se escriben como una clase `BaseTool` con un nombre, una descripción (que el LLM lee para saber cuándo usarla), un esquema de parámetros (`args_schema`) y el método `_run`, que hace el trabajo.
+- **Cómo se usa aquí:**
+  - **Consulta:** `consultar_ley_21719` busca artículos de la ley.
+  - **Memoria:** `buscar_analisis_anteriores` busca proyectos parecidos ya analizados.
+  - **Escritura:** `guardar_ficha` guarda la ficha en un archivo.
+  - **Delegación:** el Moderador usa la herramienta que CrewAI le da a todo jefe para delegar trabajo.
+  - **Razonamiento numérico:** `DelphiStatsTool` envuelve la estadística de `stats.py`. Como CrewAI no deja que el jefe tenga herramientas propias, el motor llama a esas funciones directamente.
+  - Las herramientas tienen **estado**, como `SimulatedEmailTool` de la clase: registran cada uso (entrada, motivo y resultado), y ese registro se muestra en la página En vivo.
+- **En el código:** `asesor.py` (`ConsultarLeyTool`, `BuscarAnalisisAnterioresTool`, `GuardarFichaTool`) y `tools.py` (`DelphiStatsTool`).
+- **Lección aprendida:** CrewAI declara las herramientas en "modo estricto", donde todos los parámetros son obligatorios. Con un parámetro opcional, o con uno solo, el modelo de Groq generaba llamadas mal formadas. Por eso cada herramienta tiene dos parámetros obligatorios, y uno es el `motivo`.
+
+#### 4. Memoria de corto y largo plazo
+
+- **Qué es:** la **memoria de corto plazo** es lo que el sistema recuerda **dentro** de una misma tarea larga. La **de largo plazo** es lo que recuerda **entre** tareas distintas.
+- **Cómo se usa aquí:**
+  - **Corto plazo:** en las rondas 2 y 3, cada experto recibe **su** respuesta anterior y el resumen anónimo del grupo. Así mantiene la coherencia y, si se aleja del grupo, debe justificarlo.
+  - **Largo plazo:** cada análisis terminado se guarda en la **memoria institucional**, y el Asesor lo recupera cuando llega un proyecto parecido.
+  - **Por qué la memoria propia de CrewAI está apagada (`memory=False`):** si los expertos compartieran memoria, uno podría ver lo que dijo otro, y eso rompe el método Delphi.
+- **En el código:** `engine.py` (`_prompt_experto` arma la memoria de corto plazo) y `conocimiento.py` (`BaseConocimiento.recordar` y `buscar_analisis`, guardados en `outputs/memoria/`).
+
+#### 5. RAG: búsqueda semántica en la Ley 21.719
+
+- **Qué es:** *RAG* (Retrieval-Augmented Generation) significa **buscar primero** la información relevante y **dársela** al LLM, en vez de confiar en lo que el modelo "recuerda".
+  - **Embedding:** convierte un texto en una lista de números (aquí, 3.072) que representa su significado. Textos con significado parecido quedan cerca.
+  - **Similitud coseno:** mide qué tan cerca están dos de esas listas: 1 es idéntico y 0 es que no tienen relación.
+- **Cómo se usa aquí:** la ley se dividió en 140 fragmentos por artículo en la **Evaluación Parcial 1**. Cada fragmento tiene su embedding (`gemini-embedding-001`). La pregunta del agente también se convierte en embedding y se devuelven los fragmentos más cercanos, con su cita. Por ejemplo, "datos de salud de pacientes" encuentra el **art. 16 bis**, aunque las palabras no sean las mismas. Si no hay conexión a internet, la búsqueda cae a coincidencia de palabras, donde las palabras raras pesan más (IDF).
+- **En el código:** `conocimiento.py` (`EmbedderOpenAI`, `IndiceVectorial.buscar`, `cita`), `data/conocimiento/` (fragmentos e índice) y `scripts/indexar_conocimiento.py`, que construye el índice.
+
+![Conocimiento y memoria: el Asesor normativo usa sus herramientas sobre el índice de la ley y la memoria institucional, y el código verifica la ficha](docs/img/arquitectura-6-conocimiento-y-memoria.jpg)
+
+#### 6. Alucinaciones y cómo se controlan
+
+- **Qué es:** una *alucinación* ocurre cuando el LLM inventa algo que suena creíble, como un artículo o un análisis que no existe. Nos pasó: cuando una herramienta fallaba, el agente **inventó un análisis anterior**.
+- **Cómo se usa aquí:** después del Asesor, el **código** revisa la ficha:
+  - Cada cita debe haber salido de la búsqueda.
+  - Si menciona análisis anteriores, tiene que haber consultado la memoria.
+
+  Lo que no se pueda verificar queda marcado en la ficha y aparece como aviso en el informe. Además, el prompt pide copiar las citas tal cual y no suponer resultados.
+- **En el código:** `asesor.py` (`verificar_ficha`, `_normalizar_cita`).
+- **Límite:** la verificación comprueba **de dónde viene** una cita, no si la **interpretación legal** es correcta.
+
+#### 7. El método Delphi en números
+
+- **Mediana:** el valor del medio de las notas ordenadas. Se usa en vez del promedio porque una nota extrema no la mueve.
+- **Q1 y Q3:** los cuartiles, es decir, el valor bajo el que queda el 25 % y el 75 % de las notas. El **IQR** (Q3 − Q1) mide la dispersión, y **IQR ≤ 1 cuenta como consenso**.
+- **Reglas que aplica el código, no la IA:**
+  - Otra ronda si no hay consenso (80 % de los ítems), con un mínimo de 2 rondas y un máximo de 3.
+  - **Firme / condicionada / abierta** para cada decisión.
+  - **Viable / con condiciones / no viable / en discusión** para el veredicto.
+- **En el código:** `stats.py` (`cuartiles`, `es_estable`, `estado_decision`, `veredicto_viabilidad`), `decisiones.py` (`clasificar_decision`, `evaluar_viabilidad`) y `engine.py` (`decidir_continuar`).
+
+#### 8. Independencia de los expertos (lo que hace que esto sea Delphi)
+
+- **Enunciado sellado:** el código arma el prompt de cada experto, y el Moderador solo decide cuándo delegar. Así no puede resumir ni cambiar lo que el experto recibe (`ExpertoDelphi` en `crew.py`).
+- **Salida directa:** se usa la respuesta del experto, no la del Moderador, que podría reescribir una nota.
+- **`context=[]` y un Crew por experto:** ninguna tarea ve el resultado de otra.
+- **`guard_independencia`** (`prompts.py`): rechaza cualquier dato que no esté permitido en el prompt de un experto.
+
+#### 9. Planificación y decisiones adaptativas
+
+- **Planificación:** el Moderador planifica el cuestionario (qué decisiones y qué evaluaciones) y el Asesor planifica sus consultas según el proyecto.
+- **Secuenciación por condiciones:** el motor decide si sigue a otra ronda según el consenso, la estabilidad y el mínimo y máximo de rondas.
+- **Adaptación a fallas:** si un proveedor responde 429 (límite por minuto) o 500 (error del servidor), el motor espera y reintenta. Si responde 413 (la petición es muy grande) o 404 (el modelo ya no existe), o si una respuesta sigue inválida, **le cambia el modelo al experto**, respetando los roles afines, y lo registra con el evento `cambio_modelo`.
+- **En el código:** `engine.py` (`ejecutar_ronda_crewai`, `con_reintentos`, `_cambiar_modelo`) y `config.py` (`ModelPool.alternativo`).
+
+#### 10. Paralelismo, API y pantallas en vivo
+
+- **Paralelismo:** los expertos responden al mismo tiempo, en hilos separados, así cada ronda dura lo que tarda el más lento y no la suma. Los eventos se numeran con un candado para que el frontend no se salte ninguno.
+- **API:** FastAPI recibe el análisis, lo pone en cola, lo ejecuta en un hilo y lo guarda en disco (`backend/api/`).
+- **En vivo:** Streamlit consulta los eventos nuevos cada 2 segundos y muestra solo la etapa en curso (`frontend/pages/2_En_vivo.py`).
+
+### Recorrido de un análisis por el código
+
+1. **Pantalla:** `frontend/pages/1_Nuevo.py` arma la configuración y `api_client.py` la envía a `POST /runs`.
+2. **API:** `backend/api/main.py` (`ServicioDelphi.crear`) valida las reglas y la pone en cola, y el hilo trabajador llama a `DelphiEngine.run`.
+3. **Modelos:** `config.py` (`ModelPool.para_run`) asigna un modelo a cada experto.
+4. **Asesor:** `engine.py` (`_preparar_contexto`) llama a `asesor.py` (`preparar_ficha`). Investigador y Redactor usan sus herramientas y `verificar_ficha` revisa las citas.
+5. **Cuestionario:** el Moderador lo escribe (`moderador_prompts.py`) y el código lo acota y le agrega la pregunta de viabilidad (`acotar_cuestionario`, `asegurar_item_viabilidad`).
+6. **Rondas:** `ejecutar_ronda_crewai` crea un Crew jerárquico por experto, en paralelo. Cada respuesta se valida y se emite apenas llega (`procesar`).
+7. **Resumen de la ronda:** `tools.py` y `stats.py` calculan los números, `anonymizer.py` resume los argumentos y `decidir_continuar` decide si hay otra ronda.
+8. **Cierre:** `decisiones.py` produce las decisiones, los riesgos y el veredicto, `adr.py` los ADR y `report.py` el informe.
+9. **Guardado:** `store.py` guarda todo en `outputs/runs/<id>/` y `conocimiento.py` (`recordar`) lo agrega a la memoria.
+10. **Resultados:** `frontend/pages/3_Decisiones.py` muestra el veredicto, las decisiones y los riesgos.
+
+### Preguntas probables y dónde está la respuesta
+
+| Pregunta | Dónde mirar |
+|----------|-------------|
+| ¿Qué herramientas usa el agente y cómo decide usarlas? | Concepto 3 de esta guía, `asesor.py` y el evento `contexto_preparado` en la página En vivo (muestra cada llamada con su motivo). |
+| ¿Cómo implementaron la memoria de corto y de largo plazo? | Concepto 4, `engine._prompt_experto` y `conocimiento.BaseConocimiento.recordar`. Prueba: `test_asesor_y_memoria_de_largo_plazo_en_la_api`. |
+| ¿Cómo funciona la recuperación semántica? ¿Por qué embeddings y no búsqueda por palabras? | Concepto 5, `conocimiento.IndiceVectorial.buscar` y los ejemplos de art. 16 bis y art. 27 de la §1.8. |
+| ¿Qué relación tiene con la Evaluación Parcial 1? | Concepto 5 y `data/conocimiento/README.md`: se reutilizan los 140 fragmentos y la idea anti-alucinación. |
+| ¿Por qué un proceso jerárquico en las rondas y uno secuencial en el Asesor? | Concepto 2: en las rondas el jefe decide la delegación; en el Asesor el orden es fijo (investigar → redactar). |
+| ¿Cómo evitan que los expertos se influyan entre sí? | Concepto 8 y la hoja 3 del diagrama. |
+| ¿Cómo demuestra el agente decisiones adaptativas? | Concepto 9 y la §9: los tres proyectos dan resultados distintos, el Asesor cambia su plan y hay cambios de modelo registrados. |
+| ¿Qué pasa si una IA falla o inventa? | Conceptos 6 y 9, y la hoja 5 del diagrama. |
+| ¿Por qué el veredicto lo da el código y no la IA? | Concepto 7: las reglas tienen que ser fijas, repetibles y auditables. |
+| ¿Cuáles son las limitaciones? | §9: límites de los planes gratuitos, GPT-OSS solo en la ronda 1 y una verificación que no juzga la interpretación legal. |
+
+---
+
 ## 1. Técnica Delphi aplicada a proyectos informáticos
 
 La técnica Delphi es un método estructurado para obtener consenso entre expertos. Sus rasgos esenciales son:
@@ -185,7 +321,7 @@ El Moderador genera el cuestionario a partir del proyecto. Los ítems se agrupan
 
 ### 1.3 Arquitectura del sistema
 
-Diagrama completo en [`docs/arquitectura.drawio`](docs/arquitectura.drawio), en 5 hojas con notas explicativas: **1** visión general, **2** un análisis paso a paso (quién hace cada cosa), **3** una ronda por dentro (CrewAI y por qué los expertos no se influyen), **4** componentes y responsables, **5** modelos de IA y respaldos ante los límites de los planes gratuitos. Se abre en https://app.diagrams.net o en la extensión Draw.io de VS Code. Las imágenes de [`docs/img/`](docs/img/) son la exportación de esas hojas: si se edita el diagrama, hay que volver a exportarlas.
+Diagrama completo en [`docs/arquitectura.drawio`](docs/arquitectura.drawio), en 6 hojas con notas explicativas: **1** visión general, **2** un análisis paso a paso (quién hace cada cosa), **3** una ronda por dentro (CrewAI y por qué los expertos no se influyen), **4** componentes y responsables, **5** modelos de IA y respaldos ante los límites de los planes gratuitos, **6** conocimiento y memoria (el Asesor normativo, sus herramientas, el RAG de la Ley 21.719 y la memoria institucional). Se abre en https://app.diagrams.net o en la extensión Draw.io de VS Code. Las imágenes de [`docs/img/`](docs/img/) son la exportación de esas hojas: si se edita el diagrama, hay que volver a exportarlas.
 
 ![Componentes del sistema por capa y responsable](docs/img/arquitectura-4-componentes.jpg)
 
@@ -225,13 +361,15 @@ Diagrama completo en [`docs/arquitectura.drawio`](docs/arquitectura.drawio), en 
 
 1. **Ingesta:** el usuario completa la plantilla del proyecto (§1.6) en el frontend o sube un `.md`.
 2. **Panel:** el sistema sugiere los expertos (núcleo más opcionales relevantes) y el usuario confirma o ajusta.
+2b. **Asesor normativo** (`asesor.py`, §1.8): un Crew **secuencial** de dos agentes con herramientas consulta la Ley 21.719 (RAG) y la memoria institucional, y guarda una ficha de contexto con citas. El código verifica las citas; la ficha llega igual a todos los expertos y al Moderador.
 3. **Cuestionario:** el Moderador identifica las **decisiones clave** y genera los ítems de evaluación y de decisión por dimensión.
 4. **Ronda k:** el Moderador delega en cada experto **por separado**, en un Crew jerárquico propio por experto. Cada experto responde en JSON usando *su* modelo.
    - **Enunciado sellado:** el prompt del experto lo arma el código y el Moderador solo decide la delegación. Así no puede resumirlo ni agregarle opiniones ajenas, y tampoco copia miles de tokens en cada delegación.
    - **Salida directa:** la respuesta se toma del experto, no de la respuesta final del Moderador, que podría reescribir puntajes.
 5. **Agregación:** el motor calcula, sin LLM, la mediana, Q1, Q3 y el IQR de cada ítem y cada alternativa (`stats.py`, la misma lógica que expone `DelphiStatsTool`). El anonimizador resume los argumentos sin revelar autor ni modelo. Lo hace el código y no el Moderador porque CrewAI no permite que el `manager_agent` tenga herramientas, y así los números son reproducibles.
 6. **Decisión de continuar:** el Moderador propone si hace falta otra ronda, y **el código impone los límites**. Si hay otra ronda, cada experto recibe el feedback anónimo (estadísticas y argumentos saneados, nunca texto libre de un LLM) junto con su respuesta anterior.
-7. **Informe:** veredicto de viabilidad (calculado por el código a partir de la pregunta fija `VIA-E1`), decisiones recomendadas (firme, condicionada o abierta), ADR, riesgos técnicos, evaluación por dimensión, disensos con la PoC sugerida y sesgo por modelo.
+7. **Informe:** veredicto de viabilidad (calculado por el código a partir de la pregunta fija `VIA-E1`), decisiones recomendadas (firme, condicionada o abierta), ADR con su contexto normativo, riesgos técnicos, evaluación por dimensión, disensos con la PoC sugerida y sesgo por modelo.
+8. **Memoria:** el análisis terminado se indexa en la memoria institucional (`outputs/memoria/`), donde lo encontrará el Asesor en los análisis siguientes.
 
 Cada paso emite un **evento**, que el frontend muestra en vivo.
 
@@ -278,6 +416,20 @@ Así funciona una ronda por dentro: un equipo CrewAI por experto, con el enuncia
 - `adr/ADR-001-<decision>.md`, …: **un ADR por decisión**, con el formato *Contexto · Decisión · Alternativas consideradas · Consecuencias · Estado (Aceptada / Condicionada / Abierta) · Evidencia Delphi* (mediana, IQR y argumentos).
 - `rondas.json` y `eventos.jsonl`: trazabilidad completa para auditar.
 - `estado.json`: estado del run para la API y el historial.
+- `ficha_contexto.md`: la ficha que escribió el Asesor normativo con su herramienta de escritura.
+
+### 1.8 Agentes, herramientas, memoria y planificación (indicadores IL2.1 a IL2.4)
+
+Dónde está cada capacidad que pide la Evaluación Parcial 2 y cómo se comprueba:
+
+| Indicador | Qué se implementó | Dónde | Evidencia |
+|-----------|-------------------|-------|-----------|
+| **IL2.1 · Herramientas de consulta, escritura y razonamiento** | El Asesor normativo es un Crew **secuencial** de dos agentes (investigador → redactor, con `context=[tarea_anterior]`, como `3-multiagent_crewai_full.py`). Sus herramientas son `BaseTool` de CrewAI con estado, como `SimulatedEmailTool` de la clase: **consulta** `consultar_ley_21719`, **memoria** `buscar_analisis_anteriores` y **escritura** `guardar_ficha`, que escribe `ficha_contexto.md`. El agente decide cuándo y cómo usarlas, y cada llamada declara su `motivo`. El Moderador usa las herramientas de **delegación** de CrewAI (`Process.hierarchical`). El **razonamiento** numérico (mediana, IQR y reglas) lo hacen funciones deterministas (`stats.py`, `DelphiStatsTool`). | `backend/delphi/asesor.py`, `crew.py`, `tools.py` | Evento `contexto_preparado` con cada herramienta usada, su entrada, su motivo y su resultado (página En vivo). Tests en `test_conocimiento.py`. |
+| **IL2.2 · Memoria de corto plazo** | Continuidad entre rondas: cada experto recibe **su** respuesta anterior y el resumen anónimo del grupo. Se construye en el código y se valida con `guard_independencia`, y la memoria propia de CrewAI se desactiva a propósito para no romper la independencia Delphi. | `engine.py` (`_prompt_experto`), `prompts.py` | Rondas 2 y 3 del informe, con la justificación obligatoria para los expertos fuera de [Q1, Q3]. |
+| **IL2.2 · Memoria de largo plazo** | **Memoria institucional:** cada análisis terminado se indexa con embeddings (proyecto, veredicto, decisiones y riesgos) y el Asesor lo recupera cuando llega un proyecto parecido. | `conocimiento.py` (`BaseConocimiento.recordar`), `outputs/memoria/` | El segundo análisis encuentra al primero (`test_asesor_y_memoria_de_largo_plazo_en_la_api`). |
+| **IL2.2 · Recuperación semántica de contexto** | **RAG sobre la Ley 21.719** con los 140 fragmentos de la EP1, `gemini-embedding-001` y similitud coseno. Si no hay red, la búsqueda cae a palabras ponderadas por IDF. | `conocimiento.py`, `data/conocimiento/`, `scripts/indexar_conocimiento.py` | "datos de salud de pacientes" → art. 16 bis; "servidores en otro país" → art. 27; "multas por filtración" → arts. 35 y 37. |
+| **IL2.3 · Planificación y decisiones adaptativas** | El Moderador **planifica** el cuestionario. El Asesor **decide su plan de consultas** según el proyecto (si no hay datos personales, consulta menos). El motor **secuencia** las rondas por condiciones (consenso, estabilidad, mínimo y máximo) y **se adapta** a fallas (cambia de modelo ante 429, 413, 404 o respuestas inválidas). | `engine.py`, `asesor.py`, `config.py` | §9: tres proyectos con resultados distintos y cambios de modelo registrados con `cambio_modelo`. |
+| **IL2.4 · Documentación y orquestación** | Este README, el diagrama de 5 hojas (§1.3) y la verificación anti-alucinación de la ficha, documentada en `asesor.verificar_ficha`. | `README.md`, `docs/` | — |
 
 ---
 
@@ -291,7 +443,8 @@ MultiAgente_Crew_AI/
 ├── .gitignore                     # .env, outputs/, __pycache__/
 ├── data/
 │   ├── plantilla_proyecto.md      # plantilla de input (§1.6)          — Juan
-│   └── proyectos/                 # proyectos informáticos de ejemplo  — Juan
+│   ├── proyectos/                 # proyectos informáticos de ejemplo  — Juan
+│   └── conocimiento/              # Ley 21.719: 140 fragmentos de la EP1 + índice vectorial (RAG)
 ├── backend/
 │   ├── delphi/
 │   │   ├── models.py              # contratos Pydantic (§4)            — los tres
@@ -311,7 +464,9 @@ MultiAgente_Crew_AI/
 │   │   ├── engine.py              # DelphiEngine: rondas, eventos, límites — Pamela
 │   │   ├── decisiones.py          # decisiones, disensos y riesgos     — Pamela
 │   │   ├── report.py              # informe.md                         — Pamela
-│   │   └── adr.py                 # generación de ADR por decisión     — Pamela
+│   │   ├── adr.py                 # generación de ADR por decisión     — Pamela
+│   │   ├── conocimiento.py        # índice vectorial, RAG de la ley y memoria institucional (§1.8)
+│   │   └── asesor.py              # Asesor normativo: 2 agentes + 3 herramientas + verificación (§1.8)
 │   ├── api/
 │   │   ├── main.py                # FastAPI                            — Juan
 │   │   └── store.py               # RunStore                           — Juan
@@ -321,7 +476,12 @@ MultiAgente_Crew_AI/
 │   ├── pages/                     # 1_Nuevo, 2_En_vivo, 3_Decisiones, 4_Historial
 │   ├── api_client.py              # cliente HTTP de la API             — Jenaro
 │   └── mocks/                     # runs falsos para desarrollar sin backend — Jenaro
-├── outputs/runs/<run_id>/         # informe.md, adr/, rondas.json, eventos.jsonl
+├── scripts/
+│   ├── experimento_sesgo.py       # control mono vs auto               — Jenaro
+│   └── indexar_conocimiento.py    # construye el índice de la ley y la memoria (RAG)
+├── docs/                          # arquitectura.drawio, img/ (diagramas), material_clase/
+├── outputs/runs/<run_id>/         # informe.md, adr/, rondas.json, eventos.jsonl, ficha_contexto.md
+├── outputs/memoria/               # memoria institucional (índice de análisis terminados)
 └── tests/
 ```
 
@@ -567,12 +727,13 @@ class InformeDelphi(BaseModel):
     sesgo_por_modelo: list[SesgoModelo]
     avisos: list[str]                      # p. ej. "panel mono-modelo"
     viabilidad: Viabilidad | None = None   # ¿el proyecto, tal como está planteado, es viable?
+    ficha_contexto: str | None = None      # ficha del Asesor normativo (Ley 21.719 + memoria institucional)
 
 class EventoDelphi(BaseModel):             # lo que consume el frontend en vivo
     run_id: str
     seq: int                               # incremental, para pedir solo los eventos nuevos
     timestamp: datetime
-    tipo: Literal["run_iniciado", "panel_confirmado", "cuestionario_generado",
+    tipo: Literal["run_iniciado", "panel_confirmado", "contexto_preparado", "cuestionario_generado",
                   "ronda_iniciada", "respuesta_experto", "ronda_agregada",
                   "decision_moderador", "cambio_modelo", "run_finalizado",
                   "run_cancelado", "error"]
@@ -767,6 +928,12 @@ Con `USE_MOCKS=false` en el `.env`, el frontend usa la API. Para una demo sin ke
 .venv\Scripts\python.exe -m scripts.experimento_sesgo --api-url http://localhost:8000 --timeout 1800 --proyectos data/proyectos/clinica_reservas.md data/proyectos/migracion_erp.md data/proyectos/marketplace_ia.md
 ```
 
+**Índice de conocimiento (RAG):** el índice de la Ley 21.719 ya viene en `data/conocimiento/`. Para reconstruirlo, o para cargar en la memoria los análisis ya guardados:
+
+```powershell
+.venv\Scripts\python.exe -m scripts.indexar_conocimiento     # ~2 min con el plan gratuito de embeddings
+```
+
 **Tests:** `.venv\Scripts\python.exe -m pytest -q` (sin keys ni red).
 
 > **Cuota del LLM:** por ronda, cada experto hace 1 llamada y el Moderador unas 2 por experto (delegar y cerrar), más 1 para decidir si continuar. A eso se suman 1 llamada para el cuestionario y 1 para consolidar los riesgos. Con 5 expertos y 3 rondas son unas **50 llamadas**, pero las del Moderador son cortas porque el enunciado va sellado y no lo copia. Los expertos responden **en paralelo** (`DELPHI_PARALELO`, 5 por defecto; `--paralelo` en la CLI), así que cada ronda dura lo que tarda el experto más lento. Para el límite de tokens por minuto sirven las keys `MODERADOR_<n>` de cuentas distintas y `DELPHI_PAUSA` (5 s por defecto entre el inicio de un experto y el siguiente). Con `DELPHI_PARALELO=1` responden de a uno. Si se agota la cuota, reducir el panel a los 5 del núcleo o usar `max_rondas = 2`.
@@ -779,6 +946,7 @@ Corridas de punta a punta con la configuración de *Modelos en uso* (§3), el 23
 |----------|:------:|:--------:|------------|:--------:|
 | Clínicas (viable) | 2 | 100 % y 100 % | ✅ Monolito modular · ✅ PaaS gestionado · ✅ PWA | 27 min (antes de ejecutar a los expertos en paralelo) |
 | ERP (polémico) | 2 | 96 % y 96 % | ✅ Lift & shift · ✅ Mantener Oracle · ✅ Máquinas virtuales · ⚠️ Identidad cloud (empata con Zero-Trust) · ⚠️ Blue-green (empata con migración por módulos) | **5 min 34 s** |
+| Marketplace (débil), **con el Asesor normativo** (EP2), 7 expertos | 2 | 84 % → 100 % | ⛔ **Veredicto: no viable tal como está planteado** (mediana 2, IQR 0) · ✅ MVP de catálogo · ✅ Serverless · ✅ LLM por API externa · ✅ Delegar los pagos | 9 min 11 s |
 | Marketplace (débil), **desde el frontend**, 7 expertos | 2 | **60 % → 80 %** | ✅ **MVP de catálogo** (el marketplace completo sacó 1) · ✅ Serverless · ✅ Cifrado mínimo PCI DSS · ✅ Pruebas automatizadas · ⚠️ Observabilidad completa | 6 min 30 s |
 
 **Observaciones para la validación con criterio humano:**
@@ -789,14 +957,57 @@ Corridas de punta a punta con la configuración de *Modelos en uso* (§3), el 23
 - El consenso es alto desde la ronda 1. Con 5 expertos y notas de 1 a 5, el umbral IQR ≤ 1 es fácil de cumplir (2, 3, 3, 4, 5 ya es consenso). Conviene probar `umbral_iqr = 0.5` (se cambia en la página 1) o acentuar los sesgos de los perfiles.
 - Los riesgos siempre muestran "5 menciones": el conteo de `consolidar_riesgos` compara palabras sueltas y con descripciones largas todo coincide. Pendiente de ajustar.
 
+**Asesor normativo con modelos reales:**
+
+- El Investigador **adapta su plan de consultas al proyecto**. En clínicas consultó datos sensibles de salud, seguridad y transferencia internacional; en el marketplace, consentimiento, cesión a terceros y datos financieros.
+- La memoria **recuperó análisis anteriores reales**: para el marketplace, el análisis previo del mismo proyecto, con sus riesgos de abuso de *prompts* y de agotar los créditos de IA.
+- La verificación **detectó 3 citas** que el modelo agregó por su cuenta (arts. 11, 23 y 32), porque no venían de la búsqueda, y las marcó en la ficha y en los avisos del informe. La verificación comprueba **de dónde viene** cada cita, no si la interpretación legal es correcta: eso sigue requiriendo criterio humano.
+
 **Problemas de los planes gratuitos que el motor ya resuelve solo:**
 
 | Situación | Qué hace el motor |
 |-----------|-------------------|
-| Límite por minuto (429) | Espera 30 s y 60 s y reintenta; el Moderador pasa a su key siguiente |
+| Límite por minuto (429) o error pasajero del proveedor (500, 502, 503) | Espera 30 s y 60 s y reintenta; el Moderador pasa a su key siguiente; si persiste, cambia de modelo |
 | Petición mayor que el límite por minuto (413) o modelo retirado (404) | Cambia de inmediato el modelo del experto (`cambio_modelo`), respetando los roles afines, y encadena respaldos si hace falta |
 | Respuesta incompleta o JSON mal formado | Reintenta con el error en el prompt; si sigue mal, cambia de modelo |
 | Pregunta de evaluación vinculada a una decisión | La desvincula al recibir el cuestionario |
 | Cuestionario más grande que lo acordado | Lo recorta a 5 decisiones y 10 evaluaciones |
 
 **Limitación conocida:** con el plan gratuito de Groq, GPT-OSS-20B solo responde la ronda 1; desde la ronda 2 su experto pasa a Gemini o Gemma. El panel conserva 3 familias en la ronda 1 y 2 en las siguientes. Con una key de pago (o un proveedor con más tokens por minuto) se mantienen las 3 en todas las rondas.
+
+## 10. Referencias
+
+Anthropic. (2026). *Claude Code* (Claude Opus 5.5) [Modelo de lenguaje de gran escala]. https://claude.com/claude-code
+
+Biblioteca del Congreso Nacional de Chile. (2024). *Ley N° 21.719: Regula la protección y el tratamiento de los datos personales y crea la Agencia de Protección de Datos Personales* (publicada el 13 de diciembre de 2024). https://www.bcn.cl/leychile
+
+CrewAI. (2026). *CrewAI documentation* (versión 1.15). https://docs.crewai.com
+
+Dalkey, N., & Helmer, O. (1963). An experimental application of the Delphi method to the use of experts. *Management Science, 9*(3), 458–467. https://doi.org/10.1287/mnsc.9.3.458
+
+Google. (2026). *Gemini API: Embeddings*. https://ai.google.dev/gemini-api/docs/embeddings
+
+Groq. (2026). *GroqCloud documentation: Rate limits*. https://console.groq.com/docs/rate-limits
+
+Lewis, P., Perez, E., Piktus, A., Petroni, F., Karpukhin, V., Goyal, N., Küttler, H., Lewis, M., Yih, W., Rocktäschel, T., Riedel, S., & Kiela, D. (2020). Retrieval-augmented generation for knowledge-intensive NLP tasks. *Advances in Neural Information Processing Systems, 33*, 9459–9474.
+
+Linstone, H. A., & Turoff, M. (Eds.). (1975). *The Delphi method: Techniques and applications*. Addison-Wesley.
+
+Nygard, M. (2011, 15 de noviembre). *Documenting architecture decisions*. Cognitect. https://cognitect.com/blog/2011/11/15/documenting-architecture-decisions
+
+OpenAI. (2025). *gpt-oss-120b & gpt-oss-20b model card*. https://openai.com/index/introducing-gpt-oss/
+
+Ramírez, S. (2026). *FastAPI* [Software]. https://fastapi.tiangolo.com
+
+Streamlit. (2026). *Streamlit documentation*. https://docs.streamlit.io
+
+Yao, S., Zhao, J., Yu, D., Du, N., Shafran, I., Narasimhan, K., & Cao, Y. (2023). ReAct: Synergizing reasoning and acting in language models. *International Conference on Learning Representations (ICLR 2023)*.
+
+## 11. Declaración de uso de inteligencia artificial
+
+> ⚠️ **Sección para que el equipo la revise y la complete.** Las indicaciones de la evaluación piden declarar qué herramientas de IA se usaron y cómo. También piden que las conclusiones, las justificaciones técnicas del informe y las reflexiones individuales se redacten **sin** IA.
+
+- **Herramienta usada en el desarrollo:** Claude Code (Anthropic, modelo Claude Opus 5.5).
+- **Para qué se usó:** generación, revisión y depuración de código (motor, API, ModelPool, RAG y Asesor normativo); pruebas automatizadas; diagnóstico de los límites de los proveedores con corridas reales; redacción de la documentación técnica de este README y de los diagramas de `docs/`.
+- **Cómo se validó:** *(completar por el equipo: qué revisaron, qué corrigieron y qué decisiones tomaron ustedes).*
+- **IA dentro del producto:** los modelos que usa el sistema (gpt-oss, Gemini, Gemma y los embeddings de Google) son parte de la solución, no apoyo a la redacción, y están documentados en §3.

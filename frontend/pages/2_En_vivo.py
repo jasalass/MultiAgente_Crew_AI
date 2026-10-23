@@ -24,17 +24,40 @@ def _respuesta(evento):
     return payload.get("respuesta", payload)
 
 
+ICONOS_HERRAMIENTA = {"consultar_ley_21719": "⚖️ Consultó la Ley 21.719", "buscar_analisis_anteriores":
+                      "🧠 Buscó en la memoria institucional", "guardar_ficha": "📝 Guardó la ficha"}
+
+
 def preparacion(eventos, en_curso):
-    """Panel y cuestionario. Abierto solo mientras el Moderador escribe el cuestionario."""
+    """Asesor normativo, panel y cuestionario. Abierto solo mientras se preparan."""
     cuestionario = next((e["payload"] for e in eventos if e["tipo"] == "cuestionario_generado"), None)
     panel = next((e["payload"] for e in eventos if e["tipo"] == "panel_confirmado"), {})
-    etiqueta = ("Preparación · ✔ panel y cuestionario listos" if cuestionario
-                else "Preparación · ⏳ el Moderador está escribiendo el cuestionario")
+    contexto = next((e["payload"] for e in eventos if e["tipo"] == "contexto_preparado"), None)
+    if cuestionario:
+        etiqueta = "Preparación · ✔ ficha de contexto, panel y cuestionario listos"
+    elif contexto:
+        etiqueta = "Preparación · ⏳ el Moderador está escribiendo el cuestionario"
+    else:
+        etiqueta = "Preparación · ⏳ el Asesor normativo consulta la ley y la memoria"
     with st.expander(etiqueta, expanded=en_curso and not cuestionario):
         if panel.get("panel"):
             st.write("**Panel:** " + ", ".join(panel["panel"]))
             if auditor and panel.get("modelos"):
                 st.caption(" · ".join(f"{rol}: {modelo}" for rol, modelo in panel["modelos"].items()))
+        if contexto:
+            st.write("**Asesor normativo** (agentes con herramientas, antes de la ronda 1):")
+            for consulta in contexto.get("consultas", []):
+                st.write(f"{ICONOS_HERRAMIENTA.get(consulta['herramienta'], consulta['herramienta'])}: "
+                         f"«{consulta['entrada']}»")
+                detalle = [f"motivo: {consulta['motivo']}"] if consulta.get("motivo") else []
+                if consulta.get("resultados"):
+                    detalle.append(f"{consulta.get('modo', '')} → " + " · ".join(consulta["resultados"][:3]))
+                if detalle:
+                    st.caption(" | ".join(detalle))
+            for advertencia in contexto.get("advertencias", []):
+                st.warning(advertencia)
+            with st.container(height=220):
+                st.markdown(contexto.get("ficha", ""))
         if cuestionario:
             for decision in cuestionario.get("decisiones", []):
                 st.write(f"**{decision['titulo']}:** " + " · ".join(decision["alternativas"]))

@@ -118,6 +118,11 @@ def mostrar_informe(informe):
     veredicto_viabilidad(informe)
     for aviso in informe.get("avisos", []):
         st.warning(aviso)
+    if informe.get("ficha_contexto"):
+        with st.expander("⚖️ Contexto normativo y memoria institucional (ficha del Asesor normativo)"):
+            st.caption("La prepararon agentes con herramientas antes de la ronda 1: consultaron la Ley 21.719 "
+                       "(RAG de la Evaluación Parcial 1) y los análisis anteriores. Todos los expertos la recibieron.")
+            st.markdown(informe["ficha_contexto"])
     st.subheader("Decisiones recomendadas")
     tarjetas_decisiones(informe)
     st.subheader("Riesgos")

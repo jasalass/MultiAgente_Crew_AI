@@ -142,3 +142,23 @@ def test_el_cliente_del_frontend_funciona_contra_la_api_real(api, servicio, monk
     assert "panel mono-modelo: riesgo de falso consenso" in informe["avisos"]
     assert cliente.obtener_informe(run_id, formato="md").startswith("#")
     assert cliente.descargar_adrs(run_id)[:2] == b"PK"
+
+
+def test_asesor_y_memoria_de_largo_plazo_en_la_api(tmp_path):
+    """Dos análisis seguidos: el segundo encuentra al primero en la memoria institucional."""
+    from backend.delphi.asesor import asesor_simulado
+    from backend.delphi.conocimiento import BaseConocimiento
+    base = BaseConocimiento(None, dir_memoria=tmp_path / "memoria")          # índice real de la ley, por palabras
+    pool = pool_simulado()
+    servicio = ServicioDelphi(RunStore(tmp_path / "runs"), pool, motor_simulado(pool, asesor=asesor_simulado(base)), base)
+    with TestClient(crear_app(servicio)) as api:
+        primero = api.post("/runs", json=_config()).json()["run_id"]
+        servicio.esperar_cola()
+        segundo = api.post("/runs", json=_config()).json()["run_id"]
+        servicio.esperar_cola()
+        eventos = api.get(f"/runs/{segundo}/eventos").json()
+        contexto = next(e for e in eventos if e["tipo"] == "contexto_preparado")["payload"]
+        memoria = next(c for c in contexto["consultas"] if c["herramienta"] == "buscar_analisis_anteriores")
+        assert memoria["resultados"] == [ejemplos_proyectos()[0]["nombre"]]     # recordó el primer análisis
+        assert "Ley 19.628" in api.get(f"/runs/{segundo}/informe").json()["ficha_contexto"]
+        assert len(base.memoria.documentos) == 2 and primero != segundo

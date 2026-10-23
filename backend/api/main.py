@@ -25,8 +25,10 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.responses import PlainTextResponse, Response
 
 from backend.api.store import RunStore
+from backend.delphi.asesor import asesor_simulado, preparar_ficha
 from backend.delphi.config import RAIZ, ModelPool
-from backend.delphi.engine import DelphiEngine, RunCancelado, RunError
+from backend.delphi.conocimiento import BaseConocimiento, EmbedderOpenAI
+from backend.delphi.engine import DelphiEngine, RunCancelado, RunError, elegir_moderador
 from backend.delphi.experts import NUCLEO, listar_expertos, sugerir_panel
 from backend.delphi.models import ConfigRun, EstadoRun, EventoDelphi, InformeDelphi, Proyecto
 from backend.delphi.project_loader import parsear_markdown
@@ -39,28 +41,42 @@ def _ahora() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def motor_real(pool: ModelPool, pausa: float, paralelo: int = 1) -> Callable[[ConfigRun], DelphiEngine]:
+def asesor_real(pool: ModelPool, base: BaseConocimiento, dir_runs: Path) -> Callable[[Any, str], dict]:
+    """El Asesor normativo con el modelo del Moderador; guarda la ficha en la carpeta del run."""
+    def preparar(proyecto: Any, run_id: str) -> dict:
+        moderadores = pool.get_llm("moderador")            # una key para cada agente del Asesor
+        return preparar_ficha(proyecto, elegir_moderador(moderadores, 0), base,
+                              dir_runs / run_id / "ficha_contexto.md", run_id, elegir_moderador(moderadores, 1))
+    return preparar
+
+
+def motor_real(pool: ModelPool, pausa: float, paralelo: int = 1,
+               asesor: Callable[[Any, str], dict] | None = None) -> Callable[[ConfigRun], DelphiEngine]:
     def crear(config: ConfigRun) -> DelphiEngine:
         llm_para = pool.para_run(config)
         return DelphiEngine(llm_para, pausa_entre_expertos=pausa, paralelo=paralelo,
-                            modelo_alternativo=pool.alternativo, avisos=pool.avisos)
+                            modelo_alternativo=pool.alternativo, avisos=pool.avisos, asesor=asesor)
     return crear
 
 
-def motor_simulado(pool: ModelPool, pausa: float = 0.0) -> Callable[[ConfigRun], DelphiEngine]:
+def motor_simulado(pool: ModelPool, pausa: float = 0.0,
+                   asesor: Callable[[Any, str], dict] | None = None) -> Callable[[ConfigRun], DelphiEngine]:
     def crear(config: ConfigRun) -> DelphiEngine:
         llm_para = pool.para_run(config)
         ejecutar, moderador = crear_simulacion(semilla=config.seed or 7, pausa=pausa)
-        return DelphiEngine(llm_para, ejecutar, moderador, avisos=[AVISO_SIMULADO, *pool.avisos])
+        return DelphiEngine(llm_para, ejecutar, moderador, avisos=[AVISO_SIMULADO, *pool.avisos], asesor=asesor)
     return crear
 
 
 class ServicioDelphi:
     """Cola de análisis: valida, encola, ejecuta de a uno y registra todo en el RunStore."""
 
-    def __init__(self, store: RunStore, pool: ModelPool, crear_motor: Callable[[ConfigRun], DelphiEngine]):
+    def __init__(self, store: RunStore, pool: ModelPool, crear_motor: Callable[[ConfigRun], DelphiEngine],
+                 memoria: BaseConocimiento | None = None):
+        """`memoria`: donde se recuerda cada análisis terminado (memoria institucional de largo plazo)."""
         self.store, self.pool = store, pool
         self._crear_motor = crear_motor
+        self._memoria = memoria
         self._cola: queue.Queue[str] = queue.Queue()
         self._cancelados: set[str] = set()
         self._lock = threading.Lock()
@@ -124,6 +140,11 @@ class ServicioDelphi:
             informe = motor.run(run_id, estado.config, self.store.agregar_evento,
                                 lambda: self._cancelado(run_id))
             self.store.guardar_informe(run_id, informe)
+            if self._memoria is not None:
+                try:
+                    self._memoria.recordar(informe, run_id)
+                except Exception as error:      # la memoria no debe hacer fallar un análisis terminado
+                    logging.getLogger("delphi").warning("No se pudo guardar en la memoria: %s", error)
             self.store.actualizar(run_id, estado="finalizado", finalizado=_ahora())
         except RunCancelado:
             self.store.actualizar(run_id, estado="cancelado", finalizado=_ahora())
@@ -150,13 +171,21 @@ def servicio_por_defecto() -> ServicioDelphi:
         load_dotenv(RAIZ / ".env")
     except ModuleNotFoundError:
         pass
-    store = RunStore(Path(os.getenv("DELPHI_OUTPUTS", RAIZ / "outputs" / "runs")))
+    dir_runs = Path(os.getenv("DELPHI_OUTPUTS", RAIZ / "outputs" / "runs"))
+    store = RunStore(dir_runs)
+    con_asesor = os.getenv("DELPHI_ASESOR", "true").strip().lower() not in {"0", "false", "no"}
     if _verdadero("DELPHI_SIMULADO"):
         pool = pool_simulado()
-        return ServicioDelphi(store, pool, motor_simulado(pool, float(os.getenv("DELPHI_PAUSA_SIMULADO", "0.3"))))
+        # Sin embeddings (búsqueda por palabras, sin red) y con memoria aparte: los análisis ficticios
+        # no deben aparecer como "lecciones" en la memoria real.
+        base = BaseConocimiento(None, dir_memoria=RAIZ / "outputs" / "memoria_simulada")
+        return ServicioDelphi(store, pool, motor_simulado(pool, float(os.getenv("DELPHI_PAUSA_SIMULADO", "0.3")),
+                                                          asesor_simulado(base) if con_asesor else None), base)
     pool = ModelPool.desde_env()
+    base = BaseConocimiento(EmbedderOpenAI.desde_env())
     return ServicioDelphi(store, pool, motor_real(pool, float(os.getenv("DELPHI_PAUSA", "5")),
-                                                  int(os.getenv("DELPHI_PARALELO", "5"))))
+                                                  int(os.getenv("DELPHI_PARALELO", "5")),
+                                                  asesor_real(pool, base, dir_runs) if con_asesor else None), base)
 
 
 def crear_app(servicio: ServicioDelphi | None = None) -> FastAPI:

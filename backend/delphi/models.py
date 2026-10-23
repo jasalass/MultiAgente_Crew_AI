@@ -150,12 +150,13 @@ class InformeDelphi(BaseModel):
     sesgo_por_modelo: list[SesgoModelo]
     avisos: list[str]                      # p. ej. "panel mono-modelo"
     viabilidad: Viabilidad | None = None   # ¿el proyecto, tal como está planteado, es viable?
+    ficha_contexto: str | None = None      # ficha del Asesor normativo (Ley 21.719 + memoria institucional)
 
 class EventoDelphi(BaseModel):             # lo que consume el frontend en vivo
     run_id: str
     seq: int                               # incremental, para pedir solo los eventos nuevos
     timestamp: datetime
-    tipo: Literal["run_iniciado", "panel_confirmado", "cuestionario_generado",
+    tipo: Literal["run_iniciado", "panel_confirmado", "contexto_preparado", "cuestionario_generado",
                   "ronda_iniciada", "respuesta_experto", "ronda_agregada",
                   "decision_moderador", "cambio_modelo", "run_finalizado",
                   "run_cancelado", "error"]

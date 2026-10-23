@@ -41,6 +41,12 @@ def renderizar_informe(i: InformeDelphi) -> str:
     sec += ["## Resumen ejecutivo", _resumen_ejecutivo(i), ""]
     if i.avisos:
         sec += ["> " + " · ".join(i.avisos), ""]
+    if i.ficha_contexto:
+        # Los títulos de la ficha bajan un nivel para quedar dentro de esta sección.
+        ficha = "\n".join(("#" + linea) if linea.startswith("##") else linea for linea in i.ficha_contexto.splitlines())
+        sec += ["## Contexto normativo y memoria institucional",
+                "_Ficha del Asesor normativo: Ley 21.719 (RAG) y análisis anteriores, antes de la ronda 1._", "",
+                ficha, ""]
 
     sec += ["## Decisiones recomendadas", _tabla(
         ["Decisión", "Recomendación", "Estado", "Mediana", "IQR", "Margen"],

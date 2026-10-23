@@ -387,3 +387,16 @@ def test_veredicto_de_viabilidad_explicito(notas, veredicto):
     assert informe.viabilidad.veredicto == veredicto and informe.viabilidad.explicacion
     from backend.delphi.report import renderizar_informe
     assert "## Veredicto de viabilidad" in renderizar_informe(informe)
+
+
+def test_un_500_del_proveedor_se_reintenta_y_luego_cambia_de_modelo(monkeypatch):
+    def responder(worker):
+        if worker.llm.model.endswith("inestable"):
+            raise RuntimeError("Error code: 500 - [{'error': {'code': 500, 'message': 'Internal error encountered.'}}]")
+        return _salida(CONSENSO[0])
+    _crew_falso(monkeypatch, responder)
+    llms = {"cloud": _llm("inestable"), "moderador": [_llm("moderador")]}
+    motor = _motor_crewai(lambda i: llms.get(i, _llm("sano")), modelo_alternativo=lambda i: _llm("respaldo"))
+    informe, eventos = _correr(motor)
+    assert next(e for e in eventos if e.tipo == "cambio_modelo").payload["experto"] == "cloud"
+    assert informe.rondas

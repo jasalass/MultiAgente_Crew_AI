@@ -15,7 +15,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from backend.delphi.asesor import asesor_simulado, preparar_ficha
 from backend.delphi.config import RAIZ, ModelPool
+from backend.delphi.conocimiento import BaseConocimiento, EmbedderOpenAI
 from backend.delphi.engine import DelphiEngine, RunCancelado, RunError
 from backend.delphi.experts import NUCLEO
 from backend.delphi.models import ConfigRun, EstadoRun
@@ -37,6 +39,7 @@ def main() -> None:
     ap.add_argument("--pausa", type=float, default=5.0, help="segundos entre el inicio de un experto y el siguiente")
     ap.add_argument("--paralelo", type=int, default=5, help="expertos que responden a la vez (1 = de a uno)")
     ap.add_argument("--mock", action="store_true", help="LLM falsos: no usa keys ni red")
+    ap.add_argument("--sin-asesor", action="store_true", help="sin el Asesor normativo (más rápido)")
     args = ap.parse_args()
     # La consola de Windows (cp1252) no admite algunos caracteres que escriben los LLM (p. ej. "‑").
     for flujo in (sys.stdout, sys.stderr):
@@ -63,14 +66,20 @@ def main() -> None:
         print(f"  {'puntual':13} -> {llm.model} (cuestionario y riesgos)")
     for aviso in pool.avisos:
         print(f"AVISO: {aviso}")
-    if args.mock:
-        ejecutar, moderador = crear_simulacion(seed)
-        motor = DelphiEngine(llm_para, ejecutar, moderador)
-    else:
-        motor = DelphiEngine(llm_para, pausa_entre_expertos=args.pausa, paralelo=args.paralelo,
-                             modelo_alternativo=pool.alternativo, avisos=pool.avisos)
-
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if args.mock:
+        base = BaseConocimiento(None, dir_memoria=RAIZ / "outputs" / "memoria_simulada")
+        ejecutar, moderador = crear_simulacion(seed)
+        motor = DelphiEngine(llm_para, ejecutar, moderador, asesor=None if args.sin_asesor else asesor_simulado(base))
+    else:
+        base = BaseConocimiento(EmbedderOpenAI.desde_env())
+        moderadores = llm_para("moderador")         # una key para cada agente del Asesor
+        asesor = None if args.sin_asesor else (lambda proyecto, rid: preparar_ficha(
+            proyecto, moderadores[0], base, runs / rid / "ficha_contexto.md", rid,
+            moderadores[1 % len(moderadores)]))
+        motor = DelphiEngine(llm_para, pausa_entre_expertos=args.pausa, paralelo=args.paralelo,
+                             modelo_alternativo=pool.alternativo, avisos=pool.avisos, asesor=asesor)
+
     destino = runs / run_id
     destino.mkdir(parents=True, exist_ok=True)
     eventos = destino / "eventos.jsonl"
@@ -91,7 +100,13 @@ def main() -> None:
         run_id=run_id, estado="finalizado", ronda_actual=len(informe.rondas), config=config,
         creado=datetime.strptime(run_id, "%Y%m%d-%H%M%S").astimezone(),
         finalizado=datetime.now().astimezone()).model_dump_json(indent=2), encoding="utf-8")
+    try:
+        base.recordar(informe, run_id)          # memoria institucional para los próximos análisis
+    except Exception as error:
+        print(f"AVISO: no se pudo guardar el análisis en la memoria: {error}")
     print(f"\nListo. Resultados en {destino}")
+    if informe.viabilidad:
+        print(f"  VEREDICTO: {informe.viabilidad.veredicto}")
     for d in informe.decisiones:
         print(f"  {d.estado.upper():13} {d.titulo}: {d.alternativa_recomendada or 'ABIERTA'}")
 

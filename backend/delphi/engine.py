@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -119,6 +120,27 @@ def asegurar_item_viabilidad(cuestionario: Cuestionario) -> Cuestionario:
     return cuestionario.model_copy(update={"items": [*cuestionario.items, item]})
 
 
+def bloque_ficha(ficha: str | None) -> str:
+    """La ficha del Asesor, agregada después del contexto que valida guard_independencia.
+
+    Es igual para todo el panel y se escribe antes de la ronda 1 (nadie opinó todavía): es
+    material de referencia verificable, no la opinión de otro experto.
+    """
+    if not ficha:
+        return ""
+    return ("\n\nFICHA DE CONTEXTO (preparada por el Asesor normativo antes de la ronda 1, igual para todo el "
+            "panel; es material de referencia verificable, no la opinión de otro experto):\n" + ficha)
+
+
+def con_contexto_normativo(adrs: list, ficha: str | None) -> list:
+    """Agrega al contexto de cada ADR las obligaciones legales de la ficha del Asesor (con sus citas)."""
+    seccion = re.search(r"##\s*Obligaciones legales relevantes\s*\n(.*?)(?=\n##|\Z)", ficha or "", re.DOTALL)
+    if not seccion or not seccion.group(1).strip():
+        return adrs
+    extra = "\n\nContexto normativo (Ley 21.719, según la ficha del Asesor):\n" + seccion.group(1).strip()
+    return [a.model_copy(update={"contexto": a.contexto + extra}) for a in adrs]
+
+
 def elegir_moderador(moderadores: Any, n: int) -> Any:
     """Rota entre varios LLM de Moderador (o devuelve el único que haya)."""
     if isinstance(moderadores, (list, tuple)):
@@ -127,9 +149,14 @@ def elegir_moderador(moderadores: Any, n: int) -> Any:
 
 
 def _es_limite_de_tasa(error: Exception) -> bool:
-    """429/rate limit: esperar y reintentar sirve. Un 413 (petición mayor que el tope) no."""
+    """Falla pasajera: esperar y reintentar sirve. Un 413 (petición mayor que el tope) no.
+
+    Incluye el 429 (límite de tasa) y los errores del servidor del proveedor (500, 502, 503,
+    "internal", "overloaded", "unavailable"), que en los planes gratuitos aparecen de vez en cuando.
+    """
     texto = str(error).lower()
-    return "429" in texto or "rate limit" in texto or "rate_limit" in texto
+    return any(s in texto for s in ("429", "rate limit", "rate_limit", "error code: 500", "error code: 502",
+                                    "error code: 503", "internal error", "overloaded", "unavailable"))
 
 
 def _modelo_no_disponible(error: Exception) -> bool:
@@ -216,7 +243,8 @@ def ejecutar_ronda_crewai(moderadores: Any, expertos: list[dict], llms: dict[str
             except Exception as error:
                 nuevo = None
                 caido = _modelo_no_disponible(error)
-                if cambiar_modelo and (caido or _es_limite_de_tasa(error))                         and not _culpa_del_moderador(error, moderadores):
+                if (cambiar_modelo and (caido or _es_limite_de_tasa(error))
+                        and not _culpa_del_moderador(error, moderadores)):
                     nuevo = cambiar_modelo(e["id"], "modelo no disponible" if caido else "límite de tasa persistente")
                 if nuevo is None:
                     raise
@@ -271,17 +299,22 @@ class DelphiEngine:
                  pausa_entre_expertos: float = 0.0,
                  modelo_alternativo: Callable[[str], Any] | None = None,
                  avisos: list[str] | None = None,
-                 paralelo: int = 1):
+                 paralelo: int = 1,
+                 asesor: Callable[[Any, str], dict] | None = None):
         """llm_para(id) -> LLM (ModelPool.get_llm). "moderador" da el LLM o la lista de LLM del Moderador.
 
         modelo_alternativo(id) -> otro LLM para ese experto ante un 429 persistente
         (ModelPool.alternativo), o None si no hay. `avisos` se agregan al informe.
         `paralelo`: cuántos expertos responden a la vez en cada ronda (1 = de a uno).
+        `asesor(proyecto, run_id)` -> {"ficha", "consultas"}: el Asesor normativo (asesor.py), que
+        consulta la Ley 21.719 y la memoria institucional antes de la ronda 1. None = sin ficha.
         """
         self._llm_para = llm_para
         self._ejecutar_ronda = ejecutar_ronda
         self._pausa = pausa_entre_expertos
         self._paralelo = paralelo
+        self._asesor = asesor
+        self._ficha: str | None = None
         self._candado = threading.Lock()   # seq y emisión juntos: con expertos en paralelo
         self._modelo_alternativo = modelo_alternativo
         self._avisos = list(avisos or [])
@@ -350,9 +383,10 @@ class DelphiEngine:
         self._emitir("panel_confirmado", {"panel": config.expertos,
                                           "modelos": {i: _modelo(llm) for i, llm in llms.items()}})
 
+        self._ficha = self._preparar_contexto(proyecto)
         self._revisar_cancelacion()
         cuestionario = asegurar_item_viabilidad(acotar_cuestionario(llm_io.llamar_y_validar(
-            self._llamar_puntual, construir_prompt_cuestionario(proyecto), Cuestionario)))
+            self._llamar_puntual, construir_prompt_cuestionario(proyecto) + bloque_ficha(self._ficha), Cuestionario)))
         self._emitir("cuestionario_generado", cuestionario.model_dump())
 
         rondas: list[ResumenRonda] = []
@@ -441,9 +475,9 @@ class DelphiEngine:
             proyecto=proyecto, panel=config.expertos, cuestionario=cuestionario, rondas=rondas,
             respuestas=respuestas, decisiones=decisiones, evaluacion_por_dimension=por_dimension,
             riesgos=riesgos, disensos=disensos, recomendaciones=recomendaciones,
-            adrs=construir_adrs(proyecto, cuestionario, rondas, decisiones),
+            adrs=con_contexto_normativo(construir_adrs(proyecto, cuestionario, rondas, decisiones), self._ficha),
             sesgo_por_modelo=sesgo, avisos=self._avisos_finales(respuestas),
-            viabilidad=evaluar_viabilidad(rondas[-1], decisiones, riesgos))
+            viabilidad=evaluar_viabilidad(rondas[-1], decisiones, riesgos), ficha_contexto=self._ficha)
         self._emitir("run_finalizado", {"rondas": len(rondas)})
         return informe
 
@@ -473,6 +507,24 @@ class DelphiEngine:
         return nuevo
 
     # ----- piezas -----
+    def _preparar_contexto(self, proyecto: Any) -> str | None:
+        """Corre el Asesor normativo y emite contexto_preparado. Si falla, se sigue sin ficha."""
+        if self._asesor is None:
+            return None
+        self._revisar_cancelacion()
+        try:
+            contexto = self._asesor(proyecto, self._run_id)
+        except Exception as error:
+            log.warning("El Asesor normativo falló: %s", error)
+            self._avisos.append(f"El Asesor normativo no pudo preparar la ficha ({type(error).__name__}); "
+                                "el panel trabajó sin ella.")
+            return None
+        self._emitir("contexto_preparado", {"ficha": contexto.get("ficha", ""),
+                                            "consultas": contexto.get("consultas", []),
+                                            "advertencias": contexto.get("advertencias", [])})
+        self._avisos += [f"Asesor normativo: {a}" for a in contexto.get("advertencias", [])]
+        return contexto.get("ficha") or None
+
     def _prompt_experto(self, experto: dict, proyecto: Any, cuestionario: Cuestionario, ronda: int,
                         anterior: RespuestaExperto | None, feedback: dict | None) -> str:
         contexto: dict[str, Any] = {"proyecto": _proyecto_para_experto(proyecto),
@@ -484,9 +536,11 @@ class DelphiEngine:
             contexto["feedback"] = feedback
         guard_independencia(contexto)      # lanza ValueError si se filtra algo ajeno
         if ronda == 1:
-            return construir_prompt_ronda_1(experto, contexto["proyecto"], contexto["cuestionario"])
-        return construir_prompt_ronda_k(experto, contexto["proyecto"], contexto["cuestionario"],
-                                        contexto["respuesta_anterior"], feedback, ronda)
+            prompt = construir_prompt_ronda_1(experto, contexto["proyecto"], contexto["cuestionario"])
+        else:
+            prompt = construir_prompt_ronda_k(experto, contexto["proyecto"], contexto["cuestionario"],
+                                              contexto["respuesta_anterior"], feedback, ronda)
+        return prompt + bloque_ficha(self._ficha)
 
     def _salida_con_reintento(self, texto: str, experto_id: str, prompt: str, llm: Any,
                               cuestionario: Cuestionario) -> _SalidaExperto:

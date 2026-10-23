@@ -2,6 +2,7 @@
 crewai>=1.15,<2
 openai>=1.0
 pydantic>=2,<3
+numpy>=1.26                 # índice vectorial local (RAG de la Ley 21.719 y memoria)
 python-dotenv>=1,<2
 fastapi>=0.110
 uvicorn>=0.29

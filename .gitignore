@@ -8,4 +8,4 @@ __pycache__/
 .pytest_cache/
 outputs/
 .streamlit/secrets.toml
-material_clase
+material_clase/

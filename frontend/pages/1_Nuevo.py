@@ -14,10 +14,12 @@ fuente = st.radio("Origen del proyecto", ["Ejemplo", "Formulario", "Archivo Mark
 base = {"nombre": "", "objetivo": "", "usuarios_volumen": "", "equipo": "", "texto_original": ""}
 identificador = "formulario"
 if fuente == "Ejemplo":
-    opciones = {f"Demo · {p['nombre']}": p for p in ejemplos_proyectos()}
+    opciones = {}
     carpeta = Path(__file__).resolve().parents[2] / "data" / "proyectos"
     for archivo in sorted(carpeta.glob("*.md")):
         opciones[f"Archivo · {archivo.stem}"] = archivo
+    if api.use_mocks or not opciones:
+        opciones.update({f"Demo · {p['nombre']}": p for p in ejemplos_proyectos()})
     elegido = st.selectbox("Proyecto de ejemplo", list(opciones))
     dato = opciones[elegido]
     if isinstance(dato, Path):

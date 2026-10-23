@@ -39,7 +39,7 @@ def _proyecto(nombre, objetivo, usuarios, funcionales, no_funcionales, restricci
 
 
 def ejemplos_proyectos():
-    """Tres ejemplos locales para trabajar mientras Juan prepara data/proyectos/."""
+    """Tres ejemplos locales para la demo sin lectura de archivos ni acceso a la API."""
     return deepcopy([
         _proyecto(
             "Reservas de una red de clínicas", "Centralizar reservas y disponibilidad de profesionales para pacientes y recepcionistas de cuatro clínicas.",
@@ -96,6 +96,9 @@ def _cuestionario(proyecto):
     ]
     items = [{"id": f"{dim[:3].upper()}-E1", "dimension": dim, "tipo": "evaluacion", "pregunta": f"{pregunta} Proyecto: {proyecto['nombre']}.", "decision_id": None, "alternativa": None}
              for dim, pregunta in zip(DIMENSIONES, preguntas)]
+    items.append({"id": "VIA-E1", "dimension": "gestion", "tipo": "evaluacion",
+                  "pregunta": f"¿Qué tan viable es {proyecto['nombre']} tal como está planteado, considerando alcance, plazo, presupuesto y equipo?",
+                  "decision_id": None, "alternativa": None})
     for decision in decisiones:
         for indice, alternativa in enumerate(decision["alternativas"]):
             items.append({"id": f"{decision['id']}-{chr(97 + indice)}", "dimension": decision["dimension"], "tipo": "alternativa",
@@ -107,6 +110,12 @@ def _puntaje(item, experto, ronda, total_rondas, config, cuestionario):
     mono = config.get("asignacion_modelos") == "mono"
     if item["tipo"] == "evaluacion":
         debil = any(t in (config["proyecto"].get("equipo", "") + " " + " ".join(config["proyecto"].get("restricciones", []))).lower() for t in ("junior", "mínimo"))
+        if item["id"] == "VIA-E1":
+            if debil:
+                return 2 if mono else [1, 2, 2, 2, 3, 2, 2][experto]
+            migracion = "migra" in config["proyecto"].get("objetivo", "").lower()
+            base = 3 if migracion else 4
+            return base if mono else [base, base, base + 1, base, base + 1, base, base][experto]
         if debil and item["dimension"] in ("gestion", "operacion", "calidad"):
             return 2 if mono else [1, 2, 2, 2, 3, 2, 2][experto]
         if mono:
@@ -212,6 +221,7 @@ def construir_informe(config):
               "El sesgo observado depende también del rol asignado; esta simulación no demuestra un efecto causal del modelo."]
     if len(set(modelos.values())) < 2:
         avisos.append("Panel mono-modelo: riesgo de falso consenso.")
+    viabilidad = _resumir_viabilidad(estadisticas["VIA-E1"])
     return {"proyecto": proyecto, "panel": config["expertos"], "cuestionario": cuestionario, "rondas": rondas, "respuestas": respuestas,
             "decisiones": decisiones, "evaluacion_por_dimension": evaluacion,
             "riesgos": [{"descripcion": f"Capacidad operativa insuficiente para {proyecto['nombre']}", "dimension": "operacion", "probabilidad": 3, "impacto": 4,
@@ -220,7 +230,23 @@ def construir_informe(config):
                          "mitigacion": "Definir permisos mínimos y verificar auditoría de accesos.", "menciones": len(config["expertos"])}],
             "disensos": [f"{d['titulo']}: no hay consenso suficiente; {d['poc_sugerida']}" for d in decisiones if d["estado"] == "abierta"],
             "recomendaciones": ["Validar las recomendaciones simuladas con el equipo antes de implementarlas.", "Acotar el MVP y comprobar las restricciones con evidencia real."],
-            "adrs": adrs, "sesgo_por_modelo": sesgo, "avisos": avisos}
+            "adrs": adrs, "sesgo_por_modelo": sesgo, "avisos": avisos, "viabilidad": viabilidad}
+
+
+def _resumir_viabilidad(estadistica):
+    """Misma regla determinista que la API; las puntuaciones siguen siendo ficticias."""
+    mediana = estadistica["mediana"]
+    consenso = estadistica["consenso"]
+    if not consenso:
+        veredicto, explicacion = "en_discusion", "No hay consenso sobre la viabilidad del proyecto."
+    elif mediana >= 4:
+        veredicto, explicacion = "viable", "El alcance, plazo y equipo resultan viables en este ejemplo."
+    elif mediana >= 3:
+        veredicto, explicacion = "viable_con_condiciones", "El proyecto requiere validar los supuestos de migración y acotar los riesgos antes de comprometerse."
+    else:
+        veredicto, explicacion = "no_viable", "El alcance, plazo y capacidad del equipo no resultan viables tal como están planteados; se debe recortar el MVP o revisar los recursos."
+    return {"veredicto": veredicto, "mediana": mediana, "iqr": estadistica["iqr"], "consenso": consenso,
+            "explicacion": "Simulación ficticia: " + explicacion}
 
 
 def construir_eventos(run_id, informe, creado=FECHA_DEMO):
@@ -248,7 +274,11 @@ def construir_eventos(run_id, informe, creado=FECHA_DEMO):
 
 
 def informe_markdown(informe):
-    lineas = [f"# Informe Delphi: {informe['proyecto']['nombre']}", "", "> DEMO: evidencia ficticia; no se invocó ningún LLM.", "", "## Resumen ejecutivo", "", informe["proyecto"]["objetivo"], "", "## Decisiones", "", "| Decisión | Recomendación | Estado | Mediana | IQR |", "|---|---|---|---:|---:|"]
+    lineas = [f"# Informe Delphi: {informe['proyecto']['nombre']}", "", "> DEMO: evidencia ficticia; no se invocó ningún LLM.", "", "## Resumen ejecutivo", "", informe["proyecto"]["objetivo"]]
+    if informe.get("viabilidad"):
+        viabilidad = informe["viabilidad"]
+        lineas += ["", "## Viabilidad global", "", f"**{viabilidad['veredicto']}** · mediana {viabilidad['mediana']:g} · IQR {viabilidad['iqr']:g}.", "", viabilidad["explicacion"]]
+    lineas += ["", "## Decisiones", "", "| Decisión | Recomendación | Estado | Mediana | IQR |", "|---|---|---|---:|---:|"]
     escapar = lambda valor: str(valor).replace("|", "\\|").replace("\n", " ")
     for decision in informe["decisiones"]:
         lineas.append("| " + " | ".join(escapar(v) for v in [decision["titulo"], decision["alternativa_recomendada"] or "PoC pendiente", decision["estado"], decision["mediana"], decision["iqr"]]) + " |")

@@ -13,7 +13,7 @@ import json
 import math
 from typing import Any
 
-from .anonymizer import sanear_argumentos
+from .anonymizer import _validar_item_id, sanear_argumentos
 from .experts import get_experto
 
 
@@ -67,6 +67,11 @@ def _cuestionario(valor: Any) -> dict[str, Any]:
     ids = [x.get("id") for x in resultado["items"]]
     if not ids or any(not isinstance(x, str) or not x for x in ids) or len(ids) != len(set(ids)):
         raise ValueError("El cuestionario requiere ítems con identificadores únicos")
+    # El mismo límite que usa la agregación se verifica antes de consultar al
+    # panel. Así un ID generado fuera del formato no consume una ronda entera
+    # para fallar recién cuando se construye el feedback anónimo.
+    for item_id in ids:
+        _validar_item_id(item_id)
     for item in resultado["items"]:
         if item.get("tipo") not in {"evaluacion", "alternativa"} or not item.get("pregunta"):
             raise ValueError("Cada ítem requiere tipo y pregunta")

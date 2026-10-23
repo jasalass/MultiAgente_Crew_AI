@@ -114,7 +114,10 @@ def sanear_argumentos(textos: list[str], postura: str) -> list[str]:
 
 def _validar_item_id(item_id: Any) -> str:
     # Identificadores estructurales, no un canal libre para nombres o modelos.
-    if not isinstance(item_id, str) or not re.fullmatch(r"[A-Z]{2,12}-[ED][1-9][0-9]*(?:-[a-z0-9]+)?", item_id):
+    # El contrato Item.id es str y los LLM pueden numerar con cero inicial o
+    # usar sufijos en mayúsculas. Esas variantes ya atraviesan models/engine y
+    # se conservan exactamente para unir estadísticas; no son prosa libre.
+    if not isinstance(item_id, str) or not re.fullmatch(r"[A-Z]{2,12}-[ED][0-9]+(?:-[A-Za-z0-9]+)?", item_id):
         raise ValueError("item_id no cumple el formato del cuestionario (p. ej. ARQ-E1)")
     return item_id
 

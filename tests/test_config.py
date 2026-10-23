@@ -107,6 +107,13 @@ def test_sin_modelos_avisa_con_claridad():
         leer_bloques({"LLM_API_KEY_X": "k", "LLM_MODEL_X": "m"})
 
 
+def test_modelo_compatible_se_construye_sin_litellm_ni_peticion():
+    from backend.delphi.config import crear_llm
+    llm = crear_llm(Bloque("PRUEBA", "familia/modelo-de-prueba", "http://127.0.0.1:1/v1", "no-se-usa", "Prueba"))
+    assert llm.model == "familia/modelo-de-prueba"
+    assert llm.supports_function_calling()
+
+
 def test_bloque_puntual_no_es_experto():
     env = {**ENV, "LLM_USO_NEMO": "puntual", "LLM_TIMEOUT_NEMO": "240"}
     pool = _pool(env)

@@ -69,6 +69,31 @@ class AnonymizerTests(unittest.TestCase):
         resultado = json.loads(AnonymizerTool().run(respuestas=[respuesta()]))
         self.assertEqual(resultado, sintetizar_argumentos([respuesta()]))
 
+    def test_ids_estructurados_aceptados_por_modelos_y_motor_no_fallan_al_agregar(self):
+        from backend.delphi.engine import DelphiEngine, acotar_cuestionario, asegurar_item_viabilidad
+        from backend.delphi.experts import get_experto
+        from backend.delphi.models import ConfigRun, Cuestionario, Proyecto, RespuestaExperto
+
+        proyecto = Proyecto(nombre="P", objetivo="O", texto_original="# P")
+        cuestionario = asegurar_item_viabilidad(acotar_cuestionario(Cuestionario.model_validate({
+            "decisiones": [{"id": "ARQ-D01", "dimension": "arquitectura", "titulo": "Estilo", "alternativas": ["Modular"]}],
+            "items": [{"id": "ARQ-E01", "tipo": "evaluacion", "dimension": "arquitectura", "pregunta": "¿Viable?"},
+                      {"id": "ARQ-D01-A", "tipo": "alternativa", "dimension": "arquitectura", "pregunta": "¿Adecuado?",
+                       "decision_id": "ARQ-D01", "alternativa": "Modular"}]})))
+        motor = DelphiEngine(lambda _: None)
+        prompt = motor._prompt_experto(get_experto("arquitectura"), proyecto, cuestionario, 1, None, None)
+        self.assertIn("ARQ-E01", prompt)
+        propia = RespuestaExperto(experto_id="E1", rol="arquitectura", modelo="local", ronda=1,
+                                 respuestas=[{"item_id": i.id, "puntaje": 4, "justificacion": "Costo y alcance"}
+                                             for i in cuestionario.items])
+        estadisticas, pct = motor._agregar([propia], cuestionario, ConfigRun(proyecto=proyecto, expertos=["arquitectura"]))
+        self.assertEqual({x.item_id for x in estadisticas}, {"ARQ-E01", "ARQ-D01-A", "VIA-E1"})
+        self.assertEqual(pct, 1)
+        feedback = {"ronda": 1, "porcentaje_consenso": pct, "estadisticas": [x.model_dump() for x in estadisticas]}
+        siguiente = motor._prompt_experto(get_experto("arquitectura"), proyecto, cuestionario, 2, propia, feedback)
+        self.assertIn("ARQ-D01-A", siguiente)
+        self.assertNotIn('"modelo"', siguiente)
+
 
 if __name__ == "__main__":
     unittest.main()

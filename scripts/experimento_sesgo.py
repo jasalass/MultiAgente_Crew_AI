@@ -4,8 +4,10 @@ No invoca LLM directamente: usa el contrato HTTP del README mediante ApiClient.
 Con ``--mock`` valida el flujo con resultados ficticios claramente identificados;
 no es evidencia experimental sobre modelos. Con API real se pueden pasar tres
 archivos Markdown: ``--proyectos p1.md p2.md p3.md``. Si se omite, se utilizan los
-tres proyectos de ejemplo del frontend. El resto de ConfigRun queda idéntico en
-ambos modos. Los informes JSON se guardan junto a la comparación CSV/Markdown.
+tres proyectos canónicos de ``data/proyectos/``. ``--modelo-mono`` permite elegir
+el modelo de control; por defecto se fija el primero del catálogo de la API.
+Los informes JSON se guardan junto a la comparación CSV/Markdown. Una API que
+devuelva el aviso de ejecución simulada también se identifica como simulación.
 
 Ejecutar desde la raíz: ``python -m scripts.experimento_sesgo --mock``.
 La API real debe estar lista: ``python -m scripts.experimento_sesgo --api-url
@@ -25,6 +27,49 @@ from statistics import fmean
 import time
 from typing import Any
 import unicodedata
+
+
+PROYECTOS_CONTROL = ("clinica_reservas.md", "migracion_erp.md", "marketplace_ia.md")
+
+
+def cargar_proyectos(
+    cliente: Any, rutas: list[Path] | None = None, *, directorio: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Parsea los mismos tres inputs canónicos tanto en mock como en HTTP."""
+    if rutas is None:
+        directorio = directorio or Path(__file__).resolve().parents[1] / "data" / "proyectos"
+        rutas = [directorio / nombre for nombre in PROYECTOS_CONTROL]
+    if len(rutas) != 3:
+        raise ValueError("El experimento requiere exactamente tres proyectos.")
+    # Leer todos antes de enviar solicitudes para detectar archivos faltantes.
+    textos = [ruta.read_text(encoding="utf-8-sig") for ruta in rutas]
+    return [cliente.parsear_proyecto(texto) for texto in textos]
+
+
+def elegir_modelo_mono(modelos: list[dict[str, Any]], solicitado: str | None) -> str:
+    """Congela una elección explícita del catálogo antes de iniciar seis runs."""
+    nombres = [modelo["nombre"] for modelo in modelos]
+    if not nombres:
+        raise ValueError("La API no tiene modelos de experto disponibles.")
+    if solicitado is not None and solicitado not in nombres:
+        raise ValueError(f"El modelo de control «{solicitado}» no está disponible en la API.")
+    return solicitado if solicitado is not None else nombres[0]
+
+
+def origen_resultados(evidencias: list[dict[str, Any]], *, mock: bool) -> str:
+    """Distingue el mock frontend de la API real que ejecuta su motor simulado."""
+    if mock:
+        return "SIMULADO: mock del frontend, no evidencia de sesgo"
+    simulados = [
+        any("simulad" in str(aviso).casefold() or "fictici" in str(aviso).casefold()
+            for aviso in evidencia.get("informe", {}).get("avisos", []))
+        for evidencia in evidencias
+    ]
+    if any(simulados):
+        if all(simulados):
+            return "API SIMULADA: motor con LLM ficticios, no evidencia de sesgo"
+        return "MIXTO: incluye API simulada, no tratar como evidencia íntegramente real"
+    return "API"
 
 
 def _normalizar(texto: str) -> str:
@@ -185,18 +230,19 @@ def guardar_comparacion(
 ) -> None:
     """Exporta métricas y evidencia; nunca convierte un resultado mock en real."""
     salida.mkdir(parents=True, exist_ok=True)
-    origen = "SIMULADO: demostración, no evidencia de sesgo" if mock else "API"
+    origen = origen_resultados(evidencias, mock=mock)
+    simulado = origen != "API"
     columnas = ["origen", "proyecto", "run_mono", "run_auto", "iqr_ronda1_mono",
                 "iqr_ronda1_auto", "rondas_hasta_consenso_mono", "rondas_hasta_consenso_auto",
                 "rondas_ejecutadas_mono", "rondas_ejecutadas_auto", "cuestionarios_equivalentes",
-                "cambios_alternativa", "cambios_estado", "decisiones_sin_pareja"]
+                "cambios_alternativa", "cambios_estado", "decisiones_sin_pareja", "modelo_mono"]
     with (salida / "comparacion.csv").open("w", newline="", encoding="utf-8-sig") as archivo:
         writer = csv.DictWriter(archivo, fieldnames=columnas, extrasaction="ignore")
         writer.writeheader()
         writer.writerows({"origen": origen, **fila} for fila in resultados)
     lineas = ["# Comparación mono frente a auto", "",
-              "**DATOS SIMULADOS: demostración funcional; no son resultados empíricos de LLM.**"
-              if mock else "Resultados obtenidos de la API; revisar las condiciones de cada ejecución.",
+              f"**DATOS SIMULADOS: {origen}. No son resultados empíricos de modelos reales.**"
+              if simulado else "Resultados obtenidos de la API; revisar las condiciones de cada ejecución.",
               "", f"Generado: {datetime.now(timezone.utc).isoformat()} (UTC).", "",
               "IQR: media de los IQR por ítem en la ronda 1. Consenso: primera ronda que alcanza "
               "el umbral global configurado; — significa que no se alcanzó. Un cierre por estabilidad "
@@ -218,6 +264,8 @@ def guardar_comparacion(
     for fila in resultados:
         lineas += ["", "## " + fila["proyecto"], "",
                    f"Runs: mono `{fila['run_mono']}` · auto `{fila['run_auto']}`.", ""]
+        if fila.get("modelo_mono"):
+            lineas += [f"Modelo fijado para el control mono: `{fila['modelo_mono']}`.", ""]
         if not fila["cambios"]:
             lineas.append("No cambiaron las alternativas ni los estados de las decisiones emparejadas.")
             continue
@@ -237,6 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mock", action="store_true", help="Usar solo datos simulados; no invoca LLM.")
     parser.add_argument("--api-url", default="http://localhost:8000")
+    parser.add_argument("--modelo-mono", help="Nombre exacto del modelo de control en GET /modelos.")
     parser.add_argument("--proyectos", nargs=3, type=Path, metavar="ARCHIVO_MD")
     parser.add_argument("--salida", type=Path, default=Path("outputs/experimento_sesgo"))
     parser.add_argument("--timeout", type=float, default=900, help="Límite en segundos por run.")
@@ -246,19 +295,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.timeout <= 0 or (args.intervalo is not None and args.intervalo < 0):
         parser.error("timeout debe ser positivo e intervalo no negativo")
     from frontend.api_client import ApiClient
-    from frontend.mocks import ejemplos_proyectos
 
     cliente = ApiClient(use_mocks=args.mock, base_url=args.api_url)
-    if args.proyectos:
-        proyectos = [cliente.parsear_proyecto(ruta.read_text(encoding="utf-8-sig")) for ruta in args.proyectos]
-    else:
-        proyectos = ejemplos_proyectos()
-    if len(proyectos) != 3:
-        raise ValueError("El experimento requiere exactamente tres proyectos.")
+    modelo_mono = elegir_modelo_mono(cliente.listar_modelos(), args.modelo_mono)
+    proyectos = cargar_proyectos(cliente, args.proyectos)
     if args.mock:
         print("DEMOSTRACIÓN CON DATOS SIMULADOS: no se llamarán modelos reales.")
     else:
         print(f"Ejecutando seis análisis mediante la API {args.api_url}.")
+    print(f"Modelo de control mono: {modelo_mono}", flush=True)
     resultados, evidencias = [], []
     for proyecto in proyectos:
         sugerencias = cliente.sugerir_panel(proyecto)
@@ -269,19 +314,22 @@ def main(argv: list[str] | None = None) -> int:
         informes, ids = {}, {}
         for modo in ("mono", "auto"):
             print(f"{proyecto['nombre']} · {modo}", flush=True)
-            config = {**config_base, "asignacion_modelos": modo}
+            config = {**config_base, "asignacion_modelos": modo,
+                      "modelos_manual": {rol: modelo_mono for rol in panel} if modo == "mono" else None}
             ids[modo], informes[modo] = ejecutar_run(
                 cliente, config, timeout=args.timeout,
                 intervalo=args.intervalo if args.intervalo is not None else (0 if args.mock else 2),
             )
             evidencias.append({"run_id": ids[modo], "config": config, "informe": informes[modo]})
+            origen = origen_resultados(evidencias, mock=args.mock)
             # Conservar los runs ya terminados si una ejecución posterior falla.
             args.salida.mkdir(parents=True, exist_ok=True)
             (args.salida / "ejecuciones_parciales.json").write_text(json.dumps({
-                "origen": "SIMULADO" if args.mock else "API", "ejecuciones": evidencias
+                "origen": origen, "ejecuciones": evidencias
             }, ensure_ascii=False, indent=2), encoding="utf-8")
         resultados.append({**comparar_informes(informes["mono"], informes["auto"]),
-                           "run_mono": ids["mono"], "run_auto": ids["auto"]})
+                           "run_mono": ids["mono"], "run_auto": ids["auto"],
+                           "modelo_mono": modelo_mono})
     guardar_comparacion(resultados, args.salida, mock=args.mock, evidencias=evidencias)
     print(f"Comparación guardada en {args.salida.resolve()}")
     return 0

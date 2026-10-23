@@ -1,4 +1,4 @@
-"""Valida la demo contra el contrato publicado sin crear models.py de Juan.
+"""Valida la demo contra el contrato publicado y los modelos integrados de la API.
 
 El bloque Python del README es la fuente acordada de los modelos. Se compila
 en memoria para que cambiar un campo del mock nunca pase inadvertido.
@@ -38,3 +38,36 @@ def test_run_eventos_informe_cumplen_contrato_publicado():
             modelos["EventoDelphi"].model_validate(evento)
         informe = api.obtener_informe(estado["run_id"])
         modelos["InformeDelphi"].model_validate(informe)
+
+
+def test_mock_cumple_modelos_reales_y_regla_de_viabilidad():
+    from backend.delphi.models import ConfigRun, EstadoRun, EventoDelphi, InformeDelphi
+    from backend.delphi.stats import veredicto_viabilidad
+
+    api = ApiClient(use_mocks=True)
+    for proyecto in ejemplos_proyectos():
+        config = ConfigRun(proyecto=proyecto, expertos=["arquitectura", "cloud", "desarrollo", "seguridad", "devops"])
+        run_id = api.crear_run(config)["run_id"]
+        cursor = 0
+        for _ in range(100):
+            for evento in api.obtener_eventos(run_id, cursor):
+                EventoDelphi.model_validate(evento)
+                cursor = evento["seq"]
+            estado = EstadoRun.model_validate(api.obtener_run(run_id))
+            if estado.estado == "finalizado":
+                break
+        assert estado.estado == "finalizado"
+        informe = InformeDelphi.model_validate(api.obtener_informe(run_id))
+        assert informe.viabilidad is not None
+        ultima = next(e for e in informe.rondas[-1].estadisticas if e.item_id == "VIA-E1")
+        assert informe.viabilidad.veredicto == veredicto_viabilidad(ultima.consenso, ultima.mediana)
+
+
+def test_parser_mock_y_api_comparten_la_plantilla_y_los_ejemplos():
+    from backend.delphi.project_loader import parsear_markdown
+
+    api = ApiClient(use_mocks=True)
+    rutas = (Path(__file__).resolve().parents[1] / "data" / "proyectos").glob("*.md")
+    for ruta in rutas:
+        texto = ruta.read_text(encoding="utf-8-sig")
+        assert api.parsear_proyecto(texto) == parsear_markdown(texto).model_dump()

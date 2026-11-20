@@ -24,6 +24,44 @@
 
 Encargo = IE1–IE5 (60 %). Presentación = IE6–IE9 (40 %). Cada uno defiende en la presentación lo que construyó.
 
+### 1.1 KPI con la técnica SMART
+
+Cada KPI cumple los cinco criterios:
+
+- **S, específico:** mide una sola cosa de una parte concreta del sistema y tiene una fórmula.
+- **M, medible:** se calcula solo con `metricas.jsonl`, `eventos.jsonl`, `estado.json`, `informe.json` o `gold.json`, sin juicio manual.
+- **A, alcanzable:** la meta parte de lo observado en la EP2 (README §8 y §9) o de la línea base de S14.
+- **R, relevante:** cada KPI responde a uno o más indicadores de la rúbrica (columna IE).
+- **T, con plazo:** la **línea base** se mide en la corrida de S14, antes de corregir nada, y la **meta** se mide en la corrida final de S16, antes de la presentación de S17.
+
+**Alcance:** la matriz de escenarios de §5. Los KPI de calidad (P y C) se miden solo con modelos reales. Latencia y recursos se informan por separado para el modo simulado y el real.
+
+Los marcados con ★ van en la fila de semáforo del dashboard.
+
+| ID | KPI (específico) | Fórmula y fuente (medible) | Línea base | Meta al cierre de S16 | 🟢 / 🟡 / 🔴 | IE | Dueño |
+|----|------------------|----------------------------|------------|-----------------------|--------------|----|-------|
+| ★ **KPI-P1** | Acierto de las decisiones frente al gold | (alternativas recomendadas que coinciden con el gold + veredictos correctos) / ítems del gold × 100. Fuente: `informe.json` contra `gold.json` | S14 | ≥ 80 % en los 3 escenarios base | ≥ 80 % / 60–79 % / < 60 % | IE1 | Pamela |
+| **KPI-P2** | Salidas válidas al primer intento | respuestas de experto con JSON válido en `intento = 1` / respuestas de experto × 100. Fuente: `metricas.jsonl` | S14 | ≥ 95 % | ≥ 95 % / 85–94 % / < 85 % | IE1 | Pamela |
+| **KPI-P3** | Precisión de las citas del Asesor | citas verificadas / citas totales × 100. Fuente: `asesor.verificar_ficha` | EP2: 3 citas sin respaldo en el marketplace | ≥ 90 % y ninguna cita sin respaldo sin su aviso | ≥ 90 % / 75–89 % / < 75 % | IE1, IE8 | Pamela |
+| ★ **KPI-C1** | Reproducibilidad | decisiones con la misma alternativa en las 3 repeticiones / decisiones × 100. Fuente: escenarios `*_repeticion` | S14 | ≥ 80 % | ≥ 80 % / 60–79 % / < 60 % | IE1 | Pamela |
+| **KPI-C2** | Robustez ante paráfrasis | decisiones iguales entre `clinica_base` y `clinica_parafraseado` / decisiones × 100 | S14 | ≥ 80 % | ≥ 80 % / 60–79 % / < 60 % | IE1 | Pamela |
+| ★ **KPI-E1** | Frecuencia de errores del LLM | spans `llm` con `resultado ≠ ok` / spans `llm` × 100 (errores cada 100 llamadas). Fuente: `metricas.jsonl` | S14 | ≤ 5 y al menos un 50 % menos que la línea base | ≤ 5 / 6–15 / > 15 | IE1, IE3 | Juan |
+| **KPI-E2** | Análisis completados | runs `finalizado` / runs lanzados × 100, sin contar las cancelaciones manuales. Fuente: `estado.json` | S14 | ≥ 95 % | ≥ 95 % / 80–94 % / < 80 % | IE1 | Juan |
+| ★ **KPI-L1** | Latencia p95 por llamada de experto | percentil 95 de `latencia_ms` en los spans `experto.*`, por modelo | S14 | ≤ 30 s en cada modelo | ≤ 30 s / 31–60 s / > 60 s | IE2 | Juan |
+| **KPI-L2** | Duración total del análisis | `run_finalizado.timestamp − run_iniciado.timestamp`, con 5 expertos, 2 rondas y modelos reales | EP2: de 5 min 34 s a 9 min 11 s | ≤ 6 min en los 3 escenarios base | ≤ 6 min / 6–10 min / > 10 min | IE2 | Juan |
+| **KPI-L3** | Tiempo perdido en esperas | Σ `espera_backoff_ms` / duración del run × 100 | S14 | ≤ 10 % | ≤ 10 % / 11–25 % / > 25 % | IE2, IE3 | Juan |
+| ★ **KPI-R1** | Tokens por análisis | Σ (`tokens_entrada` + `tokens_salida`) por run, en los escenarios base | S14 | 20 % menos que la línea base, sin que baje KPI-P1 | baja ≥ 20 % / baja 1–19 % / no baja | IE2, IE7 | Juan |
+| **KPI-R2** | Llamadas al LLM por análisis | n.º de spans `llm` por run, con 5 expertos y 3 rondas | README §8: unas 50 estimadas | ≤ 50 | ≤ 50 / 51–65 / > 65 | IE2, IE7 | Juan |
+| **KPI-R3** | Memoria pico del backend | máximo de `rss_mb` por run | S14 | ≤ 1 GB | ≤ 1 GB / 1–2 GB / > 2 GB | IE2 | Juan |
+| ★ **KPI-S1** | Fugas de datos personales y secretos | PII ficticia de `clinica_con_pii` que llega al prompt enviado o a los logs + keys del `.env` que aparecen en los logs | S14: sin redacción, toda la PII llega al proveedor | 0 | 0 / — / ≥ 1 | IE8 | Jenaro |
+| **KPI-S2** | Resistencia a la inyección | corridas de `erp_inyeccion` que dan las mismas decisiones que `erp_base` **y** dejan registrada la alerta, sobre 3 corridas | S14 | 3 de 3 | 3 / 2 / ≤ 1 | IE8 | Jenaro |
+
+**Reglas:**
+
+- Si la línea base de S14 ya cumple una meta, se sube antes de empezar las correcciones.
+- Las metas se **congelan al terminar S14**. Después no se tocan, para que la comparación antes/después sea honesta.
+- Un KPI que no llegue a su meta se informa igual: va en rojo o ámbar, con su causa y la mejora propuesta (IE7).
+
 ---
 
 ## 2. Punto de partida: qué ya tenemos
@@ -160,7 +198,7 @@ Hasta que existan los endpoints, Jenaro trabaja con un `metricas.jsonl` de ejemp
 
 - [ ] **Dashboard** `frontend/pages/5_Observabilidad.py` en Streamlit + Plotly, que ya dominamos. La rúbrica acepta Streamlit.
   - **Filtros:** escenario, run, modelo, proveedor y rango de fechas.
-  - **Fila de KPIs con semáforo:** latencia p95, errores cada 100 llamadas, tokens por run, precisión frente al gold y consistencia C1. Cada KPI con un umbral definido (verde, ámbar, rojo).
+  - **Fila de KPI con semáforo:** los seis KPI marcados con ★ en §1.1 (P1, C1, E1, L1, R1 y S1), con la meta y los umbrales de esa tabla, mostrando el valor de la línea base junto al actual.
   - **Latencia:** boxplot por modelo y barras apiladas por fase.
   - **Traza de un run en cascada (*waterfall*/Gantt):** cada span como barra en el tiempo, con los expertos en paralelo y las esperas de backoff en otro color. Es la vista estrella para IE3 e IE6.
   - **Errores:** mapa de calor de modelo × tipo de error, más una línea de `cambio_modelo` por ronda.
@@ -181,9 +219,9 @@ Hasta que existan los endpoints, Jenaro trabaja con un `metricas.jsonl` de ejemp
 
 ### 👥 Conjuntas
 
-- [ ] **Día 1:** congelar el contrato de §3, la matriz de escenarios (§5) y los umbrales del semáforo.
+- [ ] **Día 1:** congelar el contrato de §3 y la matriz de escenarios (§5), y revisar entre los tres los KPI SMART de §1.1.
 - [ ] **Reunión gold (30 min):** validar `gold.json` entre los tres.
-- [ ] **Corrida de línea base** con la matriz completa **antes** de las correcciones (la lanza Juan y la guarda en `outputs/observabilidad/baseline/`).
+- [ ] **Corrida de línea base** con la matriz completa **antes** de las correcciones (la lanza Juan y la guarda en `outputs/observabilidad/baseline/`). Con ella se anota la línea base de cada KPI de §1.1 y se congelan las metas.
 - [ ] **Corrida final** después de las correcciones, con la misma matriz.
 - [ ] README: nueva sección "Observabilidad" con cómo correr escenarios, el dashboard y los tests (cada uno escribe su parte).
 - [ ] Presentación (§8) y ensayo cronometrado.
@@ -228,7 +266,7 @@ El hilo para defender: *"la observabilidad también es un riesgo de privacidad"*
 | Sección | Págs. | Redacta | Evidencia |
 |---------|:-----:|---------|-----------|
 | 1. Contexto, arquitectura de observabilidad y escenarios | 0,5 | Juan | Diagrama de spans y matriz de §5 |
-| 2. Métricas implementadas: definición, fórmula y resultados (IE1, IE2) | 1,25 | Pamela (P, C, E) y Juan (L, R) | Tablas y 2 gráficos |
+| 2. Métricas y KPI SMART: definición, fórmula, meta y resultado (IE1, IE2) | 1,25 | Pamela (P, C, E) y Juan (L, R) | Tablas y 2 gráficos |
 | 3. Análisis de registros y trazabilidad: hallazgos y causa raíz (IE3) | 1 | Pamela | Captura de la traza en cascada y del mapa de errores |
 | 4. Dashboard (IE4) | 0,5 | Jenaro | 2–3 capturas |
 | 5. Seguridad, privacidad y uso responsable | 0,5 | Jenaro | Tabla de controles frente a la norma |
@@ -282,6 +320,7 @@ Nadie espera a nadie después del día 1: Jenaro avanza con mocks, Pamela con lo
 ## 11. Definición de "terminado"
 
 - [ ] Al menos 3 métricas por cada grupo de la rúbrica (precisión, consistencia, errores, latencia y recursos), medidas en ≥ 5 escenarios distintos.
+- [ ] Los 15 KPI SMART de §1.1 con su línea base (S14), su resultado final (S16) y su semáforo, en el dashboard y en el informe.
 - [ ] Al menos 3 hallazgos de las trazas con causa raíz y una corrección medida antes y después.
 - [ ] Dashboard con filtros, semáforo, traza en cascada y comparación antes/después.
 - [ ] Controles de privacidad implementados y con tests (PII, logs, inyección, retención).
